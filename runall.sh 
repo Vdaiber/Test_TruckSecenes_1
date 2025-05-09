@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 1) Docker-Image bauen
+docker build -t oft_truckscenes:latest .
+
+# 2) Container starten mit deinen Volumes
+docker run --rm -it \
+  -v "/Users/v_daiber/Desktop/Masterarbeit/objectfusiontransformer/datasets/v1.0-mini":/data/v1.0-mini:ro \
+  -v "/Users/v_daiber/Desktop/Masterarbeit/Datasets/man-truckscenes/samples":/data/samples:ro \
+  -v "/Users/v_daiber/Desktop/Masterarbeit/Datasets/man-truckscenes/sweeps":/data/sweeps:ro \
+  -v "/Users/v_daiber/Desktop/Masterarbeit/objectfusiontransformer/output":/output:rw \
+  oft_truckscenes:latest \

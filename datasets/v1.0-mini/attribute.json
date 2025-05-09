@@ -1,0 +1,57 @@
+[
+    {
+        "token": "eefd82c9b2f144e2b1c61a432254cff2",
+        "name": "vehicle.parked",
+        "description": "Vehicle is stationary (usually for longer duration) with no immediate intent to move."
+    },
+    {
+        "token": "c8bb6d31989545ada88e1b51d7c624bc",
+        "name": "vehicle.stopped",
+        "description": "Vehicle, with a driver/rider in/on it, is currently stationary but has an intent to move."
+    },
+    {
+        "token": "26f2383b43d34f25b2ab6f4cd6f20e8b",
+        "name": "vehicle.moving",
+        "description": "Vehicle is moving."
+    },
+    {
+        "token": "cf2fd98917644bd7b461030ec0cc3642",
+        "name": "cycle.with_rider",
+        "description": "There is a rider on the bicycle or motorcycle."
+    },
+    {
+        "token": "27b440d7cc464d58afc77c61e467c098",
+        "name": "cycle.without_rider",
+        "description": "There is NO rider on the bicycle or motorcycle."
+    },
+    {
+        "token": "3e2c074a1e484b0d9e4b8578899494f3",
+        "name": "pedestrian.sitting_lying_down",
+        "description": "The human is sitting or lying down."
+    },
+    {
+        "token": "0b54e4f5fcc1437fb0ce9fa766744295",
+        "name": "pedestrian.standing",
+        "description": "The human is standing."
+    },
+    {
+        "token": "102c3251228549449cf1bb251067f82a",
+        "name": "pedestrian.moving",
+        "description": "The human is moving."
+    },
+    {
+        "token": "ca9ac8c2b0944e808c35e84f9092f1e8",
+        "name": "traffic_sign.pole_mounted",
+        "description": "When the traffic sign is mounted on a pole, typically next to, or on the road."
+    },
+    {
+        "token": "821ea06fe42645738adda81125237196",
+        "name": "traffic_sign.overhanging",
+        "description": "When the traffic sign is mounted above the road, or hanging from an object and is not mounted on a pole thats conected with the ground plane."
+    },
+    {
+        "token": "9a27cf062ef649bba93191d56c84e079",
+        "name": "traffic_sign.temporary",
+        "description": "When the sign is temporaryly placed there, typically around contructions areas, marking constructions or temporary speed delimiter sign."
+    }
+]

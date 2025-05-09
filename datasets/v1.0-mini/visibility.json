@@ -1,0 +1,22 @@
+[
+    {
+        "token": "f95237cfe4e0480c899fab6d5e5a235c",
+        "level": 1,
+        "description": "The object is 0% to 40% visible in panoramic view of all cameras."
+    },
+    {
+        "token": "34fecb88f60d4842931ab1ce2187e6a0",
+        "level": 2,
+        "description": "The object is 41% to 60% visible in panoramic view of all cameras."
+    },
+    {
+        "token": "d8bb855a234c4831a6671a99671bdefa",
+        "level": 3,
+        "description": "The object is 61% to 80% visible in panoramic view of all cameras"
+    },
+    {
+        "token": "6adc1826065b452195ae6a76317b8ab5",
+        "level": 4,
+        "description": "The object is 81% to 100% visible in panoramic view of all cameras."
+    }
+]

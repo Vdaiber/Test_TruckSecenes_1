@@ -1,0 +1,22 @@
+# Core TruckScenes Devkit (inkl. Visualisierung)
+truckscenes-devkit[all]>=1.0.0
+
+# PyTorch & Vision
+torch>=1.13.0
+torchvision>=0.14.0
+
+# Numerik
+numpy==1.23.5
+pyquaternion>=0.9.9
+
+# Bild & Video
+opencv-python-headless>=4.5.5.64
+Pillow>=9.0.0
+matplotlib>=3.5.1
+
+# Utilities
+tqdm>=4.64.0
+scipy>=1.7.0
+
+# YAML config loader
+pyyaml>=6.0

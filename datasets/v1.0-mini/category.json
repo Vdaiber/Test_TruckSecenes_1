@@ -1,0 +1,164 @@
+[
+    {
+        "token": "c9765c01960f41f391ea560531cf7746",
+        "name": "vehicle.car",
+        "description": "Vehicle designed primarily for personal use, e.g. sedans, hatch-backs, wagons, vans, mini-vans, SUVs and jeeps.",
+        "index": 1
+    },
+    {
+        "token": "fcb056c5cbad4eabb1c319f8f0a68024",
+        "name": "vehicle.truck",
+        "description": "Vehicles primarily designed to haul cargo including pick-ups, lorrys, trucks and semi-tractors. Trailers hauled after a semi-tractor should be labeled as Trailer",
+        "index": 2
+    },
+    {
+        "token": "06e21429e8184e06956c9661bc02e46f",
+        "name": "vehicle.bus.bendy",
+        "description": "Buses and shuttles designed to carry more than 10 people and comprises two or more rigid sections linked by a pivoting joint. Annotate each section of the bendy bus individually.",
+        "index": 3
+    },
+    {
+        "token": "2aa62e5fa79648968718e1bbd9dbbaae",
+        "name": "vehicle.bus.rigid",
+        "description": "Rigid buses and shuttles designed to carry more than 10 people",
+        "index": 4
+    },
+    {
+        "token": "7ac21ff9078d4276b6ad8e70c754ddd8",
+        "name": "vehicle.construction",
+        "description": "Vehicles primarily designed for construction. Typically very slow moving or stationary. Cranes and extremities of construction vehicles are only included in annotations if they interfere with traffic. Trucks used to hauling rocks or building materials are considered trucks rather than construction vehicles.",
+        "index": 5
+    },
+    {
+        "token": "2c0e31b577df42fba451db6d19d1e54d",
+        "name": "vehicle.motorcycle",
+        "description": "Gasoline or electric powered 2-wheeled vehicle designed to move rapidly (at the speed of standard cars) on the road surface. This category includes all motorcycles, vespas and scooters. It also includes light 3-wheel vehicles, often with a light plastic roof and open on the sides, that tend to be common in Asia. If there is a rider and/or passenger, include them in the box.",
+        "index": 6
+    },
+    {
+        "token": "9bf6fc7195a345369dc6814049544cce",
+        "name": "static_object.bicycle_rack",
+        "description": "Area or device intended to park or secure the bicycles in a row. It includes all the bicycles parked in it and any empty slots that are intended for parking bicycles. Bicycles that are not part of the rack should not be included. Instead they should be annotated as bicycles separately.",
+        "index": 7
+    },
+    {
+        "token": "953a56ab599242278a3accf60a097b59",
+        "name": "vehicle.bicycle",
+        "description": "Human or electric powered 2-wheeled vehicle designed to travel at lower speeds either on road surface, sidewalks or bicycle paths. If there is a rider and/or passenger, include them in the box.",
+        "index": 8
+    },
+    {
+        "token": "fec744eb30e5499ab654c8e9576658b0",
+        "name": "vehicle.trailer",
+        "description": "Any vehicle trailer, both for trucks, cars and motorcycles (regardless of whether currently being towed or not). For semi-trailers (containers) label the truck itself as Truck.",
+        "index": 9
+    },
+    {
+        "token": "097149ba23eb42399459630b8b7e9696",
+        "name": "vehicle.emergency.police",
+        "description": "All types of police vehicles including police bicycles and motorcycles.",
+        "index": 10
+    },
+    {
+        "token": "20348e4ab48243269accc4e4dce2e0ae",
+        "name": "vehicle.emergency.ambulance",
+        "description": "All types of ambulances.",
+        "index": 11
+    },
+    {
+        "token": "01262314d8614a6ba620363d14adeefc",
+        "name": "human.pedestrian.adult",
+        "description": "An adult pedestrian moving around the cityscape. Mannequins should also be annotated as Adult Pedestrian.",
+        "index": 12
+    },
+    {
+        "token": "a8c267396c6a45d690f2417a92aef60f",
+        "name": "human.pedestrian.child",
+        "description": "A child pedestrian moving around the cityscape.",
+        "index": 13
+    },
+    {
+        "token": "46d48b607fe84e41ab4623656e195354",
+        "name": "human.pedestrian.construction_worker",
+        "description": "A human in the scene whose main purpose is construction work.",
+        "index": 14
+    },
+    {
+        "token": "e7d438c40cf64fb4b9d27b6dc60299e5",
+        "name": "human.pedestrian.stroller",
+        "description": "Any stroller. If a person is in the stroller, include in the annotation. If a pedestrian pushing the stroller, then they should be labeled separately.",
+        "index": 15
+    },
+    {
+        "token": "2162e1e26c164262a29094f4c7660eb4",
+        "name": "human.pedestrian.wheelchair",
+        "description": "Any type of wheelchair. If a pedestrian is pushing the wheelchair then they should be labeled separately.",
+        "index": 16
+    },
+    {
+        "token": "1e70fa74148d4a59872d34f5d187c198",
+        "name": "human.pedestrian.personal_mobility",
+        "description": "A small electric or self-propelled vehicle, e.g. skateboard, segway, or scooters, on which the person typically travels in a upright position. Driver and (if applicable) rider should be included in the bounding box along with the vehicle.",
+        "index": 17
+    },
+    {
+        "token": "099ef7ba76ad41b5b9ee5aca600de790",
+        "name": "human.pedestrian.police_officer",
+        "description": "Any type of police officer, regardless whether directing the traffic or not.",
+        "index": 18
+    },
+    {
+        "token": "7493aa4504524c18baa82911da8c30b4",
+        "name": "animal",
+        "description": "All animals, e.g. cats, rats, dogs, deer, birds.",
+        "index": 19
+    },
+    {
+        "token": "63d25364e0b247fbbb6c91e6d20528b2",
+        "name": "movable_object.trafficcone",
+        "description": "All types of traffic cones.",
+        "index": 20
+    },
+    {
+        "token": "fb0e058e0a0341899eabe7e4bc267367",
+        "name": "movable_object.barrier",
+        "description": "Any metal, concrete or water barrier temporarily placed in the scene in order to re-direct vehicle or pedestrian traffic. In particular, includes barriers used at construction zones. If there are multiple barriers either connected or just placed next to each other, they should be annotated separately.",
+        "index": 21
+    },
+    {
+        "token": "2d7baad02c824e07bb43b69834cd27d7",
+        "name": "movable_object.pushable_pullable",
+        "description": "Objects that a pedestrian may push or pull. For example dolleys, wheel barrows, garbage-bins with wheels, or shopping carts. Typically not designed to carry humans.",
+        "index": 22
+    },
+    {
+        "token": "f2357596637c42e29fc0eccc2b9c3458",
+        "name": "movable_object.debris",
+        "description": "Debris or movable object that is too large to be driven over safely. Includes misc. things like trash bags, temporary road-signs, objects around construction zones, and trash cans.",
+        "index": 23
+    },
+    {
+        "token": "c994c0b0fb4b44f89f615ccf91080e65",
+        "name": "vehicle.train",
+        "description": "Vehicle travelling on railway, e.g. trains and trams.",
+        "index": 24
+    },
+    {
+        "token": "3982fa268abf4a41aec6b6f56f0d4f64",
+        "name": "static_object.traffic_sign",
+        "description": "Traffic signs, with the pole for the traffic sign also within the 3D cuboid.For overhanging size, a horizontal cuboid will be used for the whole section.",
+        "index": 25
+    },
+    {
+        "token": "5491fa9a70204327a1765ac578950ce5",
+        "name": "vehicle.other",
+        "description": "Misc class for vehicles. If not sure which class the vehile belongs other vehicle will be used. Also used for all vehicles that dont belong to any other class",
+        "index": 26
+    },
+    {
+        "token": "4feae4d4e9ce480ea76757225053c1bd",
+        "name": "vehicle.ego_trailer",
+        "description": "The trailer of the recording vehicle.",
+        "index": 27
+    }
+]

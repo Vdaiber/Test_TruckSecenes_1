@@ -1,0 +1,92 @@
+[
+    {
+        "token": "b3dd3279d239492195f64963ec70b244",
+        "channel": "RADAR_RIGHT_BACK",
+        "modality": "radar"
+    },
+    {
+        "token": "c7b216f6c0c2426ea01e20ffb50ecfb0",
+        "channel": "RADAR_RIGHT_SIDE",
+        "modality": "radar"
+    },
+    {
+        "token": "27587edfa74844ce931a710995531ca9",
+        "channel": "RADAR_RIGHT_FRONT",
+        "modality": "radar"
+    },
+    {
+        "token": "fb5519c659a5400c8e9bbf6ec2e50528",
+        "channel": "RADAR_LEFT_FRONT",
+        "modality": "radar"
+    },
+    {
+        "token": "0785ec5f7a5e4c93a99fea2ad781783d",
+        "channel": "RADAR_LEFT_SIDE",
+        "modality": "radar"
+    },
+    {
+        "token": "e70adcb9ee16435abc316cfd73c58fd7",
+        "channel": "RADAR_LEFT_BACK",
+        "modality": "radar"
+    },
+    {
+        "token": "1c4f2bbb64f847a193c748c1c14f0574",
+        "channel": "LIDAR_LEFT",
+        "modality": "lidar"
+    },
+    {
+        "token": "fe19aa64da874708a8cd417103e7cdc7",
+        "channel": "LIDAR_RIGHT",
+        "modality": "lidar"
+    },
+    {
+        "token": "3f53edcde9e44caaba5e689726c7aab7",
+        "channel": "LIDAR_TOP_FRONT",
+        "modality": "lidar"
+    },
+    {
+        "token": "9ecd75e3eaf643d5b1d5a6cefba7f1f3",
+        "channel": "LIDAR_TOP_LEFT",
+        "modality": "lidar"
+    },
+    {
+        "token": "fcddf720b15b4bc3b59eef0bdf3e0f94",
+        "channel": "LIDAR_TOP_RIGHT",
+        "modality": "lidar"
+    },
+    {
+        "token": "40dad62928a4498699eebf9aa7f4be98",
+        "channel": "LIDAR_REAR",
+        "modality": "lidar"
+    },
+    {
+        "token": "0a129b96d3a3483eb63a507f0452ac58",
+        "channel": "CAMERA_LEFT_FRONT",
+        "modality": "camera"
+    },
+    {
+        "token": "ac1ee5f8d2b94fe2bb1206a0e8f44dfa",
+        "channel": "CAMERA_LEFT_BACK",
+        "modality": "camera"
+    },
+    {
+        "token": "34b35c4e51844611bf27f578cad4fbc9",
+        "channel": "CAMERA_RIGHT_FRONT",
+        "modality": "camera"
+    },
+    {
+        "token": "526e1b4441ea49bda0c3ee6bdbd085cd",
+        "channel": "CAMERA_RIGHT_BACK",
+        "modality": "camera"
+    },
+    {
+        "token": "9f4db3741c2a45979e94196c93e5a331",
+        "channel": "XSENSE_CABIN",
+        "modality": "imu"
+    },
+    {
+        "token": "84cf08668ff84bbd883eaea4e5bd074f",
+        "channel": "XSENSE_CHASSIS",
+        "modality": "imu"
+    }
+]

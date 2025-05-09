@@ -1,0 +1,49 @@
+dataset:
+  dataroot: /data
+  version: v1.0-mini
+
+output:
+  ground_truth_dir: /output/examples_gt
+  fusion_dir:       /output/fusion_results
+  dets_json:        /output/fusion_detections.json
+
+visualization:
+  scenes: []        
+  num_frames: 10    
+  history_window: 0 
+  batch_size: 1
+  camera_channel: CAMERA_LEFT_FRONT # alternativ: CAMERA_LEFT_BACK, CAMERA_RIGHT_FRONT, CAMERA_RIGHT_BACK
+ 
+
+fusion:
+  enabled: true
+  sensor_types: ['lidar','radar','camera']
+  iou_threshold:        0.3       
+  score_threshold:      0.5       
+  noise:
+    lidar:
+      translation_std: 0.1    # [m]
+      rotation_std:    0.01   # [rad]
+    radar:
+      translation_std: 0.2
+      rotation_std:    0.02
+    camera:
+      translation_std: 0.05
+      rotation_std:    0.005
+
+tracking:
+  enabled: true
+  max_age:            3
+  iou_threshold:      0.25
+  use_velocity:       false
+  use_camera_motion:  false
+
+render:
+  line_thickness: 2
+  colors:
+    gt:       [0, 255,   0]
+    fusion:   [0,   0, 255]
+    history:  [255,  0,   0]
+    track:    [255,255,   0]
+
+gt_max_boxes: 10
