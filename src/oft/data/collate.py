@@ -1,86 +1,60 @@
-"""
-Custom collate function for temporal sensor fusion.
-
-Pads:
-- Variable-length current-frame detections
-- Variable-length history sequences
-- Marks padded entries with non-class ID in feature dimension
-"""
+# oft/data/collate.py
 
 import torch
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-NON_CLASS_FEATURE_IDX = 0  # index of the class field in features
+from oft.utils.config import load_config
 
 def collate_fn(batch: List[Dict]) -> Dict:
     """
-    Batch a list of samples into tensors ready for the Transformer.
-
-    Returns:
-      - current: (B, max_boxes, 7)
-      - history: (B, history_window, max_boxes, 7)
-      - padding_mask: (B, history_window+1, max_boxes)
-      - scene: List[str]
+    Pads to pipeline.yaml‘s gt_max_boxes (if not null) or to the batch-max,
+    and returns current/history/mask + scene tokens + scene_meta dicts.
     """
-    currents = [b["current"] for b in batch]
-    histories = [b["history"] for b in batch]
-    raw_masks = [b["padding_mask"] for b in batch]  # each shape: (history_window+1,)
-    scenes = [b["scene"] for b in batch]
+    cfg       = load_config()
+    fixed_max = cfg.get("gt_max_boxes", None)
 
-    # Pad frames and histories
-    frames = _pad_frames(currents)         # shape: (B, max_boxes, 7)
-    hist = _pad_histories(histories)      # shape: (B, H, max_boxes, 7)
+    currents   = [b["current"] for b in batch]      # np.ndarray (Ni,7)
+    histories  = [b["history"] for b in batch]      # List[List[np.ndarray|None]]
+    raw_masks  = [b["padding_mask"] for b in batch] # np.ndarray (H+1,)
+    scenes     = [b["scene"] for b in batch]        # str tokens
+    metas      = [b["scene_meta"] for b in batch]   # dict per sample
 
-    # Build 3D padding mask from 1D masks
-    B, max_boxes, _ = frames.shape
-    # Convert numpy masks to torch (B, H+1)
-    masks_1d = torch.stack([torch.from_numpy(m.astype(np.uint8)) for m in raw_masks], dim=0)
-    # Expand to (B, H+1, max_boxes)
-    mask_3d = masks_1d.unsqueeze(-1).expand(-1, -1, max_boxes)
+    B = len(currents)
+
+    # 1) decide M = fixed_max or dynamic max over currents
+    if fixed_max is not None:
+        M = fixed_max
+    else:
+        M = max((arr.shape[0] for arr in currents), default=0)
+
+    # 2) Pad current to (B, M, 7)
+    frames = torch.zeros((B, M, 7), dtype=torch.float32)
+    for i, arr in enumerate(currents):
+        n = min(arr.shape[0], M)
+        if n:
+            frames[i, :n] = torch.from_numpy(arr[:n])
+
+    # 3) Pad history to (B, H, M, 7)
+    H = max(len(h) for h in histories)
+    hist = torch.zeros((B, H, M, 7), dtype=torch.float32)
+    for i, hlist in enumerate(histories):
+        for t, arr in enumerate(hlist):
+            if arr is not None and arr.shape[0] > 0:
+                n = min(arr.shape[0], M)
+                hist[i, t, :n] = torch.from_numpy(arr[:n])
+
+    # 4) Build 3D padding mask (B, H+1, M)
+    masks_1d = torch.stack(
+        [torch.from_numpy(m.astype(np.uint8)) for m in raw_masks],
+        dim=0
+    )  # (B, H+1)
+    mask_3d = masks_1d.unsqueeze(-1).expand(-1, -1, M)
 
     return {
-        "current": frames,
-        "history": hist,
-        "padding_mask": mask_3d,
-        "scene": scenes
+        "current":      frames,        # torch.Tensor (B, M, 7)
+        "history":      hist,          # torch.Tensor (B, H, M, 7)
+        "padding_mask": mask_3d,       # torch.Tensor (B, H+1, M)
+        "scene":        scenes,        # List[str]
+        "scene_meta":   metas,         # List[Dict]
     }
-
-def _pad_frames(samples: List[Optional[Dict]]) -> torch.Tensor:
-    """Pad each current frame to (max_boxes, 7)."""
-    max_boxes = max((s["boxes"].shape[0] for s in samples if s), default=0)
-    B = len(samples)
-    padded = torch.zeros((B, max_boxes, 7), dtype=torch.float32)
-
-    for i, sample in enumerate(samples):
-        if sample is None:
-            continue
-        arr = torch.from_numpy(sample["boxes"])
-        num = arr.shape[0]
-        padded[i, :num, :] = arr
-
-    return padded
-
-def _pad_histories(
-    histories: List[List[Optional[Dict]]]
-) -> torch.Tensor:
-    """
-    Pad each sample’s history:
-      outputs (B, history_window, max_boxes, 7)
-    """
-    B = len(histories)
-    H = max(len(h) for h in histories)
-    max_boxes = max(
-        (s["boxes"].shape[0] for h in histories for s in h if s), default=0
-    )
-    out = torch.zeros((B, H, max_boxes, 7), dtype=torch.float32)
-
-    for i, hist in enumerate(histories):
-        for t, sample in enumerate(hist):
-            if sample is None:
-                continue
-            arr = torch.from_numpy(sample["boxes"])
-            num = arr.shape[0]
-            out[i, t, :num, :] = arr
-
-    return out

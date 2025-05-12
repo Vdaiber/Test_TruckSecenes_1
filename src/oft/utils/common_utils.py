@@ -19,3 +19,18 @@ def list_scenes(dataroot: str, version: str) -> list:
     """
     ts = TruckScenes(version=version, dataroot=dataroot)
     return [scene["token"] for scene in ts.scene]
+
+
+def parse_scene_description(desc: str) -> dict:
+    """
+    Parsen des standardisierten description-Strings aus TruckScenes,
+    z.B. "weather.clear;daytime.noon;season.autumn;…"
+    → { "weather":"clear", "daytime":"noon", "season":"autumn", … }
+    """
+    md = {}
+    for token in desc.split(";"):
+        if "." not in token:
+            continue
+        key, val = token.split(".", 1)
+        md[key] = val
+    return md

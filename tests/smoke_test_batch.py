@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_data import TruckScenesDataset
 from oft.data.collate import collate_fn
 
 # Dataset mit Augmentation
