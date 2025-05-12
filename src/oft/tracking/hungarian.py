@@ -1,66 +1,47 @@
+# src/oft/tracking/hungarian.py
+import yaml
 import numpy as np
-import torch
 from scipy.optimize import linear_sum_assignment
-from ..utils.geometry import box3d_iou_torch
 
 class HungarianTracker:
-    """IoU-basierter Multi-Object-Tracker mit Birth/Death-Handling."""
+    def __init__(self):
+        config = yaml.safe_load(open('pipeline.yaml'))
+        self.max_age = config['tracking']['max_age']
+        self.iou_threshold = config['tracking']['iou_threshold']
+        self.tracks = []  # Liste aktiver Tracks
 
-    def __init__(self, max_age: int = 3, iou_threshold: float = 0.25):
-        self.tracks      = []       # Liste der aktuellen Tracks
-        self.next_id     = 0
-        self.max_age     = max_age
-        self.iou_thr     = iou_threshold
-        self.cost_thr    = 1.0 - iou_threshold
+    def predict(self, dt):
+        # Bewegungsprojektion: Für jeden Track Position anhand letzter Geschwindigkeit schätzen.
+        for track in self.tracks:
+            track.position += track.velocity * dt  # einfacher CV-Model
+            track.age += dt
 
-    def update(self, detections: np.ndarray) -> list:
-        M = len(self.tracks)
-        N = len(detections)
+    def update(self, detections, timestamp):
+        """Aktualisiert Tracker mit neuen Detektionen (Ground-Truth)."""
+        # 1) Vorhersage für Tracks (Zeitdifferenz seit letztem Update)
+        self.predict(dt=timestamp - self.last_timestamp)
+        self.last_timestamp = timestamp
 
-        # 1) Keine Tracks → alle Detections neu anlegen
-        if M == 0:
-            for det in detections:
-                self.tracks.append({'id':self.next_id, 'box':det, 'age':0})
-                self.next_id += 1
-            return list(self.tracks)
-
-        # 2) Kostenmatrix = 1 − IoU
-        cost = np.zeros((M, N), dtype=np.float32)
-        for i, tr in enumerate(self.tracks):
+        # 2) Kostenmatrix über IoU berechnen
+        cost = np.zeros((len(self.tracks), len(detections)))
+        for i, track in enumerate(self.tracks):
             for j, det in enumerate(detections):
-                iou = box3d_iou_torch(
-                    torch.from_numpy(tr['box']).float().unsqueeze(0),
-                    torch.from_numpy(det).float().unsqueeze(0)
-                ).item()
-                cost[i, j] = 1.0 - iou
+                iou = compute_bev_iou(track.box, det.box)
+                cost[i, j] = 1 - iou  # Minimierungsproblem
 
-        # 3) Assignment
-        row_idx, col_idx = linear_sum_assignment(cost)
-        assigned = set()
-        updated  = []
+        # 3) Matching per Hungarian
+        row_ind, col_ind = linear_sum_assignment(cost)
+        matched, unmatched_dets = set(), set(range(len(detections)))
+        for i, j in zip(row_ind, col_ind):
+            if cost[i, j] < (1 - self.iou_threshold):
+                # Weisen Track i Detektion j zu
+                self.tracks[i].update_with(detections[j])
+                matched.add(i); unmatched_dets.discard(j)
 
-        # 4) Matched-Update (nur wenn cost < cost_thr)
-        for r, c in zip(row_idx, col_idx):
-            if cost[r, c] < self.cost_thr:
-                tr = self.tracks[r]
-                tr['box'] = detections[c]
-                tr['age'] = 0
-                updated.append(tr)
-                assigned.add(c)
+        # 4) Neue Tracks für unverknüpfte Detektionen
+        for j in unmatched_dets:
+            new_track = Track(init_detection=detections[j])
+            self.tracks.append(new_track)
 
-        # 5) Neue Tracks für unmatched detections
-        for j, det in enumerate(detections):
-            if j not in assigned:
-                updated.append({'id':self.next_id, 'box':det, 'age':0})
-                self.next_id += 1
-
-        # 6) Altern für nicht upgedatete Tracks
-        existing_boxes = [t['box'] for t in updated]
-        for tr in self.tracks:
-            if not any(np.array_equal(tr['box'], b) for b in existing_boxes):
-                tr['age'] += 1
-                if tr['age'] < self.max_age:
-                    updated.append(tr)
-
-        self.tracks = updated
-        return list(self.tracks)
+        # 5) Entfernen alter Tracks nach max_age
+        self.tracks = [t for t in self.tracks if t.age <= self.max_age]

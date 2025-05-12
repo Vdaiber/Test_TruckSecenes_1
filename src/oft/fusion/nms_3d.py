@@ -1,24 +1,25 @@
-"""
-3D Non-Maximum Suppression (BEV IoU) for TruckScenes detections.
-"""
-
 # src/oft/fusion/nms_3d.py
-import torch
-from ..utils.geometry import box3d_iou_torch
+import yaml
+from shapely.geometry import Polygon
 
-def nms_3d(boxes: torch.Tensor, scores: torch.Tensor, iou_threshold: float = 0.3) -> torch.Tensor:
-    if boxes.numel() == 0:
-        return torch.empty((0,), dtype=torch.long, device=boxes.device)
-    sorted_scores, idxs = torch.sort(scores, descending=True)
-    sorted_boxes = boxes[idxs]
+# Konfiguration laden
+config = yaml.safe_load(open('pipeline.yaml'))
+iou_thresh = config['fusion']['iou_threshold']
+
+def compute_bev_iou(box1, box2):
+    """Berechnet IoU zweier 3D-Boxen in BEV."""
+    poly1 = Polygon(box1.bev_corners())  # 4-Eck auf Bodenproj.
+    poly2 = Polygon(box2.bev_corners())
+    inter = poly1.intersection(poly2).area
+    union = poly1.union(poly2).area
+    return inter/union if union>0 else 0
+
+def non_max_suppression_3d(boxes):
+    """Führt NMS auf einer Liste von 3D-Detektionen durch."""
+    boxes = sorted(boxes, key=lambda b: b.score, reverse=True)
     keep = []
-    while sorted_boxes.size(0):
-        i = idxs[0].item()
-        keep.append(i)
-        if sorted_boxes.size(0) == 1:
-            break
-        ious = box3d_iou_torch(sorted_boxes[0:1], sorted_boxes[1:])
-        mask = ious <= iou_threshold
-        idxs = idxs[1:][mask]
-        sorted_boxes = sorted_boxes[1:][mask]
-    return torch.tensor(keep, device=boxes.device, dtype=torch.long)
+    for box in boxes:
+        # Box behalten, falls IoU mit allen behaltenen < Threshold
+        if all(compute_bev_iou(box, kept) < iou_thresh for kept in keep):
+            keep.append(box)
+    return keep

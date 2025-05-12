@@ -1,8 +1,6 @@
-# pipeline.yaml
-
 dataset:
   dataroot: /data
-  version:  v1.0-mini
+  version: v1.0-mini
   augment_noise_std: 0.0
   gt_max_boxes: null   # null = dynamisch pro Batch
 
@@ -11,15 +9,17 @@ output:
   fusion_dir:        /output/fusion_results
   dets_json:         /output/fusion_detections.json
 
+# === Welche Szenen & Frames? ===
 visualization:
-  scenes: []                # [] = alle Szenen
-  num_frames: 1
-  history_window: 0
-  batch_size: 1
+  scenes: []                # [] = alle Szenen; oder Liste von Indizes [0,3] / Tokens ["..."]
+  num_frames: 1             # Anzahl Samples pro Szene (1=head only; 0=alle)
+  history_window: 0         # history-Frames (für späteres Tracking)
+  batch_size: 1             # Batch-Größe (für DataLoader-Tests)
   camera_channel: CAMERA_LEFT_FRONT
 
+# === Fusion (später) ===
 fusion:
-  enabled:        true
+  enabled:        false
   sensor_types:   ['lidar','radar','camera']
   iou_threshold:  0.3
   score_threshold: 0.5
@@ -34,6 +34,7 @@ fusion:
       translation_std: 0.0
       rotation_std:    0.0
 
+# === Tracking (später) ===
 tracking:
   enabled:            true
   max_age:            3
@@ -41,11 +42,10 @@ tracking:
   use_velocity:       false
   use_camera_motion:  false
 
+# === Wie soll gerendert werden? ===
 render:
   line_thickness:    2
   color_mode:        category   # 'sensor' oder 'category'
-  # Pfad zu eigener YAML mit {category_name: [R,G,B]}-Einträgen.
-  # null = ausschl. DevKit-Colormap verwenden
-  custom_colormap:   null
-  z_threshold:       0.1  
-  box_visibility: ANY    # ANY | ALL | NONE
+  custom_colormap:   null       # Pfad zu eigenem YAML; null = DevKit-Standard
+  z_threshold:       0.1        # Min. Kameradistanz (m)
+  box_visibility:    ANY        # ANY | ALL | NONE
