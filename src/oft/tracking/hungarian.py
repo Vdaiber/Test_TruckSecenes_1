@@ -1,47 +1,63 @@
-# src/oft/tracking/hungarian.py
-import yaml
+# Datei: hungarian.py
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-class HungarianTracker:
-    def __init__(self):
-        config = yaml.safe_load(open('pipeline.yaml'))
-        self.max_age = config['tracking']['max_age']
-        self.iou_threshold = config['tracking']['iou_threshold']
-        self.tracks = []  # Liste aktiver Tracks
+def hungarian_match(prev_positions, curr_positions, prev_velocities=None,
+                    ego_transform=None, dt=0.0, max_distance=10.0):
+    """
+    Führt Matching zwischen zwei Sets von Objektpositionen durch (z.B. von vorherigem zu aktuellem Frame).
+    
+    Argumente:
+        prev_positions (np.ndarray): Array der Form (N,2) mit [x,y] der Objekte im früheren Frame.
+        curr_positions (np.ndarray): Array der Form (M,2) mit [x,y] der Objekte im aktuellen Frame.
+        prev_velocities (np.ndarray oder None): Optional (N,2) Geschwindigkeitsvektoren [vx, vy] im vorherigen Frame.
+        ego_transform (np.ndarray oder None): Optional 3x3 oder 4x4 Transformationsmatrix (Ego-Bewegung) von prev nach curr.
+        dt (float): Zeitdifferenz zwischen den Frames (Sekunden) für die Forward-Projektion.
+        max_distance (float): Maximale Distanz zur Berücksichtigung eines Matches.
+    
+    Rückgabe:
+        matches (List[(int, int)]): Liste der Zuordnungen (index_prev, index_curr).
+    """
+    N = prev_positions.shape[0]
+    M = curr_positions.shape[0]
+    if N == 0 or M == 0:
+        return []
 
-    def predict(self, dt):
-        # Bewegungsprojektion: Für jeden Track Position anhand letzter Geschwindigkeit schätzen.
-        for track in self.tracks:
-            track.position += track.velocity * dt  # einfacher CV-Model
-            track.age += dt
+    # 1) Ego-Bewegungstransformation auf vorherige Positionen anwenden (optional)
+    if ego_transform is not None:
+        # Homogene Koordinaten [x, y, 1]
+        prev_hom = np.hstack([prev_positions, np.ones((N,1))])
+        transformed = (ego_transform @ prev_hom.T).T
+        prev_positions = transformed[:, :2]
 
-    def update(self, detections, timestamp):
-        """Aktualisiert Tracker mit neuen Detektionen (Ground-Truth)."""
-        # 1) Vorhersage für Tracks (Zeitdifferenz seit letztem Update)
-        self.predict(dt=timestamp - self.last_timestamp)
-        self.last_timestamp = timestamp
+    # 2) Forward-Projektion mit Objektgeschwindigkeiten (optional)
+    if prev_velocities is not None:
+        # Zugabe von v*dt auf die Positionen
+        prev_positions = prev_positions + prev_velocities * dt
 
-        # 2) Kostenmatrix über IoU berechnen
-        cost = np.zeros((len(self.tracks), len(detections)))
-        for i, track in enumerate(self.tracks):
-            for j, det in enumerate(detections):
-                iou = compute_bev_iou(track.box, det.box)
-                cost[i, j] = 1 - iou  # Minimierungsproblem
+    # 3) Kostenmatrix basierend auf euklidischer Distanz
+    cost_matrix = np.linalg.norm(
+        prev_positions[:, np.newaxis, :] - curr_positions[np.newaxis, :, :],
+        axis=2
+    )  # Form (N, M)
 
-        # 3) Matching per Hungarian
-        row_ind, col_ind = linear_sum_assignment(cost)
-        matched, unmatched_dets = set(), set(range(len(detections)))
-        for i, j in zip(row_ind, col_ind):
-            if cost[i, j] < (1 - self.iou_threshold):
-                # Weisen Track i Detektion j zu
-                self.tracks[i].update_with(detections[j])
-                matched.add(i); unmatched_dets.discard(j)
+    # Große Kosten für Distanzen über dem Schwellenwert
+    cost_matrix[cost_matrix > max_distance] = 1e6
 
-        # 4) Neue Tracks für unverknüpfte Detektionen
-        for j in unmatched_dets:
-            new_track = Track(init_detection=detections[j])
-            self.tracks.append(new_track)
+    # 4) Hungarian Matching (Minimieren der Kosten)
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    matches = []
+    for i, j in zip(row_ind, col_ind):
+        if cost_matrix[i, j] < 1e5:  # akzeptiert nur, wenn nicht als ungültig markiert
+            matches.append((i, j))
+    return matches
 
-        # 5) Entfernen alter Tracks nach max_age
-        self.tracks = [t for t in self.tracks if t.age <= self.max_age]
+if __name__ == "__main__":
+    # Beispielnutzung / Test
+    prev_pos = np.array([[0,0],[5,0],[10,0]])
+    curr_pos = np.array([[1,0],[5.5,0],[9.8,0]])
+    prev_vel = np.array([[1,0],[0.5,0],[0,-0.2]])
+    # Ohne Ego-Transform: Positionsdifferenz plus Velocity*dt
+    matches = hungarian_match(prev_pos, curr_pos, prev_velocities=prev_vel, dt=1.0, max_distance=2.0)
+    print("Matches (prev->curr):", matches)
