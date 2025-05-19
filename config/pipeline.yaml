@@ -1,49 +1,41 @@
-# ──────────────────────────────────────────────────────────────────────────────
+# config/pipeline.yaml
+
 dataset:
-  dataroot: /data
-  version:  v1.0-mini
-  augment_noise_std: 0.2     # Std für Gaussian-Noise (0=Clean, >0=Noisy)
-  gt_max_boxes: null          # null = dynamisch pro Batch
+  dataroot:         /data
+  version:          v1.0-mini
+  augment_noise_std: 0.2            # Std für Gaussian-Noise (>0 aktiviert Noise-Stage)
+  gt_max_boxes:     null           # null = dynamisch pro Batch
 
 output:
-  ground_truth_dir:  /output/examples_gt
-  fusion_dir:        /output/fusion_results
-  dets_json:         /output/fusion_detections.json
-  noise_comparison_dir:  /output/noise_comparison 
+  ground_truth_dir:   /output/examples_gt
+  noise_comparison_dir: /output/noise_comparison
+  fusion_comparison_dir: /output/fusion_comparison
+  fusion_dir:         /output/fusion_results
+  dets_json:          /output/fusion_detections.json
 
-# === Welche Szenen & Frames? ===
 visualization:
-  scenes: []                  # [] = alle Szenen; oder Liste von Tokens
-  sample_idx: 0               # <-- which sample to visualize
-  num_frames: 1               # Anzahl Samples pro Szene (1=head only; 0=alle)
-  history_window: 0           # history-Frames (für späteres Tracking)
-  batch_size: 1               # Batch-Größe (für DataLoader-Tests)
-  camera_channel: CAMERA_LEFT_FRONT
+  scenes:            []            # [] = alle Szenen
+  sample_idx:        7             # Sample‐Index für Vergleiche
+  num_frames:        1             # Head-only per Szene
+  history_window:    3             # History‐Fenster (für Tracking-Stage)
+  batch_size:        2             # Batch‐Size (für DL‐Tests)
+  camera_channel:    CAMERA_LEFT_FRONT
 
-# === Fusion (später) ===
 fusion:
-  enabled:        false      # => **auskommentiert**, läuft derzeit nicht
-  # sensor_types:   ['lidar','radar','camera']
-  # iou_threshold:  0.3
-  # score_threshold: 0.5
-  # noise:
-  #   lidar: {translation_std: 0.0, rotation_std: 0.0}
-  #   radar: {translation_std: 0.0, rotation_std: 0.0}
-  #   camera: {translation_std: 0.0, rotation_std: 0.0}
+  enabled:           true          # Fusion-Stage aktivieren
+  iou_threshold:     0.3           # NMS-Schwelle
+  score_threshold:   0.5           # (für später, wenn echte Scores kommen)
 
-# === Tracking (später) ===
 tracking:
-  enabled:            false    # => **auskommentiert**, läuft derzeit nicht
-  # max_age:            3
-  # iou_threshold:      0.25
-  # use_velocity:       false
-  # use_camera_motion:  false
+  enabled:           true          # Tracking-Stage aktivieren
+  max_age:           3             # wie lange ein Track „lebt“
+  iou_threshold:     0.25          # Matching-Schwelle
+  use_velocity:      true          # Forward-Projektion per Geschwindigkeit
+  use_camera_motion: true          # Ego-Bewegung berücksichtigen
 
-# === Wie soll gerendert werden? ===
 render:
   line_thickness:    2
   color_mode:        category
   custom_colormap:   null
   z_threshold:       0.1
   box_visibility:    ANY
-# ───────────────────────

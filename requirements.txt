@@ -13,6 +13,7 @@ pyquaternion>=0.9.9
 opencv-python-headless>=4.5.5.64
 Pillow>=9.0.0
 matplotlib>=3.5.1
+shapely
 
 # Utilities
 tqdm>=4.64.0
