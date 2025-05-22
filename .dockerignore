@@ -1,4 +1,17 @@
-.git
-output
-Datasets
-datasets/v1.0-mini
+# .dockerignore
+
+# Dataset, Outputs, Logs, Caches etc., die nicht ins Image sollen
+data/
+output/
+logs/
+*.cache
+__pycache__/
+*.pyc
+
+# Editor-, IDE- und Systemdateien
+.vscode/
+.idea/
+.DS_Store
+
+# Git-Verzeichnis
+.git/

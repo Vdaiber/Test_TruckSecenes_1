@@ -15,7 +15,7 @@ output:
 
 visualization:
   scenes:            []            # [] = alle Szenen
-  sample_idx:        7             # Sample‐Index für Vergleiche
+  sample_idx:        111            # Sample-Index für Vergleiche
   num_frames:        1             # Head-only per Szene
   history_window:    3             # History‐Fenster (für Tracking-Stage)
   batch_size:        2             # Batch‐Size (für DL‐Tests)
@@ -27,11 +27,12 @@ fusion:
   score_threshold:   0.5           # (für später, wenn echte Scores kommen)
 
 tracking:
-  enabled:           true          # Tracking-Stage aktivieren
-  max_age:           3             # wie lange ein Track „lebt“
-  iou_threshold:     0.25          # Matching-Schwelle
-  use_velocity:      true          # Forward-Projektion per Geschwindigkeit
-  use_camera_motion: true          # Ego-Bewegung berücksichtigen
+  enabled: true
+  max_age: 3
+  iou_threshold: 0.25               # bleibt für NMS/Fusion
+  temporal:
+    max_distance: 0.5               # in Meter oder Bildkoords
+    dt: 1.0                         # Ego-Bewegung berücksichtigen
 
 render:
   line_thickness:    2

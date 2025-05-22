@@ -118,3 +118,37 @@ if __name__ == "__main__":
     pt = np.array([[1.0, 1.0]])
     pt_new = mu.apply_transform(pt, T)
     print("Punkt (1,1) in neuem Koordinatensystem:", pt_new)
+
+def box_centers_sensor_to_world(centers, E, T_ego):
+    """
+    centers: (N,3) in Sensor-Koordsystem
+    E: 4×4 Sensor-Extrinsik (Sensor→Ego)
+    T_ego: 4×4 Ego-Pose in Welt-Koordsystem
+    → gibt (N,3) Welt-Koordsystem zurück
+    """
+    N = centers.shape[0]
+    c_h = np.hstack([centers, np.ones((N,1))])          # (N,4)
+    ego_pts = (E @ c_h.T)                               # (4,N)
+    world_pts = (T_ego @ ego_pts)                       # (4,N)
+    return world_pts[:3].T                              # (N,3)
+
+def predict_world_centers(world_centers, velocities, dt):
+    """
+    Einfache lineare Prognose: p' = p + v·dt
+    velocities: (N,3) in Welt-KS
+    """
+    return world_centers + velocities * dt
+
+def box_centers_world_to_sensor(world_centers, E, T_ego):
+    """
+    Inverse-Transform von Welt-KS → aktuelles Sensor-KS.
+    """
+    N = world_centers.shape[0]
+    w_h = np.hstack([world_centers, np.ones((N,1))])    # (N,4)
+    # Welt → Ego (inv T_ego)
+    ego_inv = np.linalg.inv(T_ego)
+    ego_pts = (ego_inv @ w_h.T)                         # (4,N)
+    # Ego → Sensor (inv E)
+    E_inv = np.linalg.inv(E)
+    sensor_pts = (E_inv @ ego_pts)                      # (4,N)
+    return sensor_pts[:3].T                             # (N,3)
