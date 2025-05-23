@@ -7,15 +7,26 @@ dataset:
   gt_max_boxes:     null           # null = dynamisch pro Batch
 
 output:
-  ground_truth_dir:   /output/examples_gt
-  noise_comparison_dir: /output/noise_comparison
+  # Ground‐truth–Visuals (Stage 1)
+  ground_truth_dir:      /output/examples_gt
+
+  # Noise‐Visuals (Stage 2)
+  noise_comparison_dir:  /output/noise_comparison
+
+  # Tracking (Stage 3)
+  tracks_json:           /output/tracks.json
+
+  # Fusion (Stage 4)
+  dets_json:             /output/fusion_detections.json
+  fused_json:            /output/fused_detections.json
+  fusion_dir:            /output/fusion_results
+
+  # Fusion‐Vergleichs‐Visuals (Stage 5)
   fusion_comparison_dir: /output/fusion_comparison
-  fusion_dir:         /output/fusion_results
-  dets_json:          /output/fusion_detections.json
 
 visualization:
   scenes:            []            # [] = alle Szenen
-  sample_idx:        111            # Sample-Index für Vergleiche
+  sample_idx:        85            # Sample-Index für Vergleiche
   num_frames:        1             # Head-only per Szene
   history_window:    3             # History‐Fenster (für Tracking-Stage)
   batch_size:        2             # Batch‐Size (für DL‐Tests)
@@ -28,11 +39,11 @@ fusion:
 
 tracking:
   enabled: true
-  max_age: 3
   iou_threshold: 0.25               # bleibt für NMS/Fusion
   temporal:
-    max_distance: 0.5               # in Meter oder Bildkoords
-    dt: 1.0                         # Ego-Bewegung berücksichtigen
+    max_distance: 10.0
+    max_age: 3                # in Meter oder Bildkoords
+    
 
 render:
   line_thickness:    2

@@ -30,4 +30,4 @@ COPY config/ config/
 ENV PYTHONPATH=/app/src
 
 # 5) Default-Entrypoint
-CMD ["python", "-m", "oft.examples.visualize"]
+CMD ["bash"]
