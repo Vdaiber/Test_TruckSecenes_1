@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 import os
 import json
-import cv2 # Importiere cv2 direkt
+import cv2 
 import math
-import numpy as np # Importiere numpy direkt
+import numpy as np 
 from pyquaternion import Quaternion
-import argparse # <--- HIER IST DER FEHLENDE IMPORT
+import argparse 
 
 from oft.utils.config import load_config
 from oft.data.dataset import TruckScenesDataset
 from truckscenes import TruckScenes 
 from truckscenes.utils.data_classes import Box as DevBox 
 from oft.utils.sensor_utils import (
-    get_camera_intrinsic, get_sensor_extrinsic, draw_boxes_on_image, CLASS_COLORS
+    get_camera_intrinsic, get_sensor_extrinsic, draw_boxes_on_image, CLASS_COLORS,
+    _debug_printed_gt, _debug_printed_fused # Importiere die globalen Debug-Flags
 )
 
 def try_load_image(path):
@@ -22,7 +23,7 @@ def try_load_image(path):
     try:
         from PIL import Image
         pil_img = Image.open(path)
-        if pil_img.mode == 'RGBA' or pil_img.mode == 'P':
+        if pil_img.mode == 'RGBA' or pil_img.mode == 'P': 
             pil_img = pil_img.convert('RGB')
         arr = np.array(pil_img)
         if arr.ndim==2: 
@@ -36,18 +37,18 @@ def try_load_image(path):
         return None
 
 def main():
-    # Argument Parser für die Konfigurationsdatei
     parser = argparse.ArgumentParser(description="Stage 5: Visualize Fusion Results vs Ground Truth")
-    parser.add_argument("-c", "--pipeline", required=False, # Mache es optional, wenn load_config() einen Default hat
-                        default="config/pipeline.yaml", # Standardpfad, falls -c nicht gegeben
+    parser.add_argument("-c", "--pipeline", required=False, 
+                        default="config/pipeline.yaml", 
                         help="Pfad zur pipeline.yaml. Standard: config/pipeline.yaml im CWD.")
     args = parser.parse_args()
 
-    cfg   = load_config(args.pipeline) # Lade Config über den (ggf. default) Pfad
+    cfg   = load_config(args.pipeline) 
 
     dcfg  = cfg["dataset"]
     vcfg  = cfg["visualization"]
     ocfg  = cfg["output"]
+    render_cfg = cfg.get("render", {}) # Hole render config
     cam_ch = vcfg["camera_channel"]
 
     sample_idx_to_visualize = vcfg.get("sample_idx", 0)
@@ -58,7 +59,7 @@ def main():
         dataroot       = dcfg["dataroot"],
         version        = dcfg["version"].strip(),
         history_window = 0, 
-        max_boxes      = 0, 
+        max_boxes      = int(dcfg.get("gt_max_boxes") or 0), # Nutze gt_max_boxes oder 0
         augment_noise_std = 0.0 
     )
     if sample_idx_to_visualize >= len(temp_ds_for_gt.samples):
@@ -69,11 +70,11 @@ def main():
 
     ts     = TruckScenes(version=dcfg["version"].strip(), dataroot=dcfg["dataroot"])
     samp   = ts.get("sample", current_sample_token)
-    sd_info = samp["data"].get(cam_ch) # Verwende .get() für sichereren Zugriff
-    if not sd_info: # sd_info ist hier der Token oder None
+    sd_info_token = samp["data"].get(cam_ch) 
+    if not sd_info_token: 
         print(f"FEHLER: Sample Data Token für Kanal {cam_ch} im Sample {current_sample_token} nicht gefunden.")
         return
-    sd = ts.get("sample_data", sd_info) # Lade das volle sample_data record mit dem Token
+    sd = ts.get("sample_data", sd_info_token) 
 
     img_fn = sd["filename"]
     if not os.path.isabs(img_fn):
@@ -88,17 +89,15 @@ def main():
     calib = ts.get("calibrated_sensor", sd["calibrated_sensor_token"])
     ego   = ts.get("ego_pose", sd["ego_pose_token"])
     K     = get_camera_intrinsic(calib) 
-    H     = get_sensor_extrinsic(ego, calib) 
+    H_world_to_sensor = get_sensor_extrinsic(ego, calib) 
 
     gt_boxes = [ ts.get_box(ann_token) for ann_token in samp["anns"] ]
     print(f"  {len(gt_boxes)} saubere GT-Boxen geladen.")
 
-    # Pfad zur Ausgabe von Stage 4 (fused_detections.json)
-    fused_input_json_path = ocfg.get("fused_json", ocfg.get("dets_json")) # Nimm fused_json oder dets_json
-    if not fused_input_json_path: # Fallback, falls keiner der Keys existiert
-        fused_input_json_path = "/output/fused_detections.json"
+    fused_input_json_path = ocfg.get("fused_json", ocfg.get("dets_json")) 
+    if not fused_input_json_path: 
+        fused_input_json_path = "/output/fused_detections.json" 
         print(f"WARNUNG: Weder 'fused_json' noch 'dets_json' in output config gefunden. Verwende Fallback: {fused_input_json_path}")
-
 
     print(f"  Lade fusionierte Detektionen aus: {fused_input_json_path}")
     if not os.path.exists(fused_input_json_path):
@@ -108,36 +107,29 @@ def main():
     with open(fused_input_json_path, "r") as f:
         fused_box_data_list_from_stage4 = json.load(f) 
 
-    fus_boxes = []
+    fus_boxes = [] 
     if not fused_box_data_list_from_stage4:
         print(f"  WARNUNG: Keine fusionierten Boxen in {fused_input_json_path} gefunden.")
     else:
-        # fused_box_data_list_from_stage4 ist eine Liste von Box-Dictionaries
-        # Alle sollten zum selben Sample-Token gehören (dem, der von Stage 4 verarbeitet wurde)
-        # Wir filtern hier explizit nach dem current_sample_token, für den wir visualisieren wollen.
-        num_total_fused_boxes = len(fused_box_data_list_from_stage4)
-        
+        num_total_fused_boxes_in_file = len(fused_box_data_list_from_stage4)
         for d in fused_box_data_list_from_stage4:
             if d.get("sample_token") == current_sample_token:
-                world_translation = d["translation_world"]
-                world_size_wlh = d["size_wlh"] 
-                world_yaw = d["rotation_yaw_world"]
+                world_translation = d.get("translation_world", [0,0,0]) 
+                world_size_wlh = d.get("size_wlh", [1,1,1]) 
+                world_yaw = d.get("rotation_yaw_world", 0.0) 
                 
                 fused_box_obj = DevBox(
                     center=world_translation, 
-                    size=world_size_wlh,
+                    size=world_size_wlh, 
                     orientation=Quaternion(axis=[0,0,1], angle=world_yaw), 
-                    name="fused_object", # Name für Farbgebung
-                    score=d.get("score_hits", 1.0) # Score aus den Hits
+                    name="fused_object", 
+                    score=d.get("score_final_for_nms", d.get("score_hits", 1.0)) 
                 )
                 fus_boxes.append(fused_box_obj)
-            # else:
-                # print(f"  DEBUG: Überspringe fusionierte Box mit Token {d.get('sample_token')} (erwartet: {current_sample_token})")
         
-        if num_total_fused_boxes > 0 and not fus_boxes:
-             print(f"  WARNUNG: Die Datei {fused_input_json_path} enthält {num_total_fused_boxes} Boxen, "
-                  f"aber keine für den aktuell zu visualisierenden Token ({current_sample_token}). "
-                  "Stelle sicher, dass Stage 3 und 4 für denselben sample_idx gelaufen sind oder die Config von Stage 5 angepasst wird.")
+        if num_total_fused_boxes_in_file > 0 and not fus_boxes:
+             print(f"  WARNUNG: Die Datei {fused_input_json_path} enthält {num_total_fused_boxes_in_file} Boxen, "
+                  f"aber keine für den aktuell zu visualisierenden Token ({current_sample_token}).")
 
         print(f"  {len(fus_boxes)} fusionierte Boxen für Visualisierung vorbereitet (für Sample {current_sample_token}).")
 
@@ -149,12 +141,33 @@ def main():
     for gt_box in gt_boxes: 
         gt_box.name = "ground_truth"
 
-    print(f"  Zeichne GT-Boxen (grün) und fusionierte Boxen (rot)...")
-    img_with_gt = draw_boxes_on_image(img, gt_boxes, K, H, cfg.get("render",{}).get("line_thickness", 2))
-    img_with_all_boxes = draw_boxes_on_image(img_with_gt, fus_boxes, K, H, cfg.get("render",{}).get("line_thickness", 2))
+    # Reset debug flags before drawing
+    global _debug_printed_gt, _debug_printed_fused
+    _debug_printed_gt = False
+    _debug_printed_fused = False
+
+    print(f"  Zeichne GT-Boxen (grün) und fusionierte Boxen (blau)...")
+    img_with_gt = draw_boxes_on_image(
+        image=img, 
+        boxes=gt_boxes, 
+        camera_k_matrix=K, 
+        world_to_sensor_transform=H_world_to_sensor, 
+        line_thickness=render_cfg.get("line_thickness", 2),
+        z_threshold=render_cfg.get("z_threshold", 0.1),
+        box_type_for_debug="gt" # NEU
+    )
+    img_with_all_boxes = draw_boxes_on_image(
+        image=img_with_gt, 
+        boxes=fus_boxes, 
+        camera_k_matrix=K, 
+        world_to_sensor_transform=H_world_to_sensor, 
+        line_thickness=render_cfg.get("line_thickness", 2),
+        z_threshold=render_cfg.get("z_threshold", 0.1),
+        box_type_for_debug="fused" # NEU
+    )
 
     CLASS_COLORS.clear()
-    CLASS_COLORS.update(original_class_colors)
+    CLASS_COLORS.update(original_class_colors) 
 
     output_comparison_dir = ocfg.get("fusion_comparison_dir", "/output/stage5_fusion_comparison")
     os.makedirs(output_comparison_dir, exist_ok=True)

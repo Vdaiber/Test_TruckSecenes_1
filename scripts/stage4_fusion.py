@@ -17,10 +17,10 @@ def main():
     cfg    = load_config(args.pipeline)
     ocfg   = cfg["output"]
     fusion_cfg = cfg["fusion"]
-    vcfg = cfg["visualization"] # Für den target_sample_token
+    # vcfg = cfg["visualization"] # Nicht mehr direkt für Token-Lookup hier benötigt
 
     tracks_json_path = ocfg.get("tracks_json", "/output/tracks.json")
-    output_fused_path = ocfg.get("fused_json", "/output/fused_detections.json") 
+    output_fused_path = ocfg.get("fused_json", ocfg.get("dets_json", "/output/fused_detections.json"))
     iou_th    = float(fusion_cfg.get("iou_threshold", 0.3))
 
     print(f"INFO Stage 4: Lade Tracks aus {tracks_json_path}")
@@ -29,32 +29,23 @@ def main():
         return
 
     with open(tracks_json_path, 'r') as f:
-        # tracks.json enthält jetzt eine Liste mit EINEM Element:
-        # das Dictionary für den von Stage 3 verarbeiteten Ziel-Frame.
-        data_from_stage3 = json.load(f)
+        # tracks.json enthält jetzt EIN Dictionary für den Ziel-Frame
+        frame_data_for_fusion = json.load(f)
 
-    if not data_from_stage3 or not isinstance(data_from_stage3, list) or len(data_from_stage3) == 0:
-        print(f"FEHLER: Tracks-Datei {tracks_json_path} ist leer oder hat ein unerwartetes Format.")
-        # Erstelle eine leere Output-Datei
+    if not frame_data_for_fusion or not isinstance(frame_data_for_fusion, dict):
+        print(f"FEHLER: Tracks-Datei {tracks_json_path} ist leer oder hat ein unerwartetes Format (erwartet Dictionary).")
         with open(output_fused_path, "w") as f: json.dump([], f, indent=2)
         print(f"✓ Stage 4: schrieb 0 Einträge → {output_fused_path} (Input-Tracks-Datei leer/falsch).")
         return
 
-    # Nimm das erste (und einzige) Element, das die Daten für den Ziel-Frame enthält
-    frame_data_for_fusion = data_from_stage3[0]
     loaded_sample_token = frame_data_for_fusion.get("sample_token")
+    if not loaded_sample_token:
+        print(f"FEHLER: Kein 'sample_token' in den geladenen Daten aus {tracks_json_path} gefunden.")
+        with open(output_fused_path, "w") as f: json.dump([], f, indent=2)
+        print(f"✓ Stage 4: schrieb 0 Einträge → {output_fused_path} (Kein Sample-Token im Input).")
+        return
+        
     print(f"INFO Stage 4: Verarbeite Tracks aus Sample-Token: {loaded_sample_token}")
-
-    # Optional: Überprüfe, ob dieser Token mit dem in der Visualisierungskonfig übereinstimmt
-    # (obwohl Stage 3 jetzt sicherstellen sollte, dass es der richtige ist)
-    # target_sample_idx_viz = vcfg.get("sample_idx", 0)
-    # from oft.data.dataset import TruckScenesDataset # Nur für Token-Lookup
-    # temp_ds = TruckScenesDataset(str(cfg["dataset"]["dataroot"]), str(cfg["dataset"]["version"]))
-    # expected_token_for_viz = temp_ds.samples[target_sample_idx_viz]
-    # if loaded_sample_token != expected_token_for_viz:
-    #     print(f"WARNUNG Stage 4: Geladener Sample-Token ({loaded_sample_token}) aus tracks.json "
-    #           f"stimmt nicht mit visualization.sample_idx ({target_sample_idx_viz} -> {expected_token_for_viz}) überein.")
-
 
     tracks_for_nms = frame_data_for_fusion.get("tracks", [])
 
@@ -64,10 +55,11 @@ def main():
     else:
         print(f"INFO Stage 4: {len(tracks_for_nms)} Tracks werden für NMS vorbereitet.")
         boxes_to_nms = np.array([track['box_world'] for track in tracks_for_nms]) 
-        scores_for_nms = np.array([track.get('hits', 1.0) for track in tracks_for_nms], dtype=np.float32)
+        # Verwende 'confidence_score' falls vorhanden, sonst 'hits' als Fallback
+        scores_for_nms = np.array([track.get('confidence_score', track.get('hits', 1.0)) for track in tracks_for_nms], dtype=np.float32)
 
-        # print(f"  Boxen für NMS (Shape): {boxes_to_nms.shape}")
-        # print(f"  Scores für NMS (Shape): {scores_for_nms.shape}")
+        print(f"  Boxen für NMS (Shape): {boxes_to_nms.shape}")
+        print(f"  Scores für NMS (Shape): {scores_for_nms.shape}")
         # print(f"  Beispiel Box (erste): {boxes_to_nms[0].tolist() if len(boxes_to_nms) > 0 else 'N/A'}")
         # print(f"  Beispiel Score (erster): {scores_for_nms[0] if len(scores_for_nms) > 0 else 'N/A'}")
         # print(f"  IoU Threshold für NMS: {iou_th}")
@@ -86,7 +78,8 @@ def main():
                 "translation_world": [float(b_world[0]), float(b_world[1]), float(b_world[2])],
                 "size_wlh":        [float(b_world[3]), float(b_world[4]), float(b_world[5])], 
                 "rotation_yaw_world":    float(b_world[6]),
-                "score_hits": float(kept_track_info.get("hits", 0)) 
+                "score_final_for_nms": float(kept_track_info.get('confidence_score', kept_track_info.get('hits', 0.0))),
+                "hits_original": float(kept_track_info.get('hits', 0)) # Behalte auch die originalen Hits
             })
 
     output_dir_for_json = os.path.dirname(output_fused_path)
