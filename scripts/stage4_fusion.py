@@ -2,135 +2,101 @@
 import argparse
 import json
 import os
-
 import numpy as np
-from pyquaternion import Quaternion
-from truckscenes.utils.geometry_utils import transform_matrix
 
-from oft.utils.motion_utils import (
-    box_centers_sensor_to_world,
-    predict_world_centers,
-    box_centers_world_to_sensor,
-)
 from oft.utils.config     import load_config
-from oft.data.dataset     import TruckScenesDataset
-from oft.fusion.nms_3d    import nms_bev_3d
+from oft.fusion.nms_3d    import nms_bev_3d 
+from oft.utils.common_utils import _to_json_serializable 
 
 def main():
-    p = argparse.ArgumentParser(description="Stage 4: Fusion")
-    p.add_argument("-c","--pipeline", required=True, help="Pfad zur pipeline.yaml")
-    args = p.parse_args()
+    parser = argparse.ArgumentParser(description="Stage 4: NMS Fusion on Tracks from Stage 3")
+    parser.add_argument("-c","--pipeline", required=False, default="config/pipeline.yaml",
+                        help="Pfad zur pipeline.yaml")
+    args = parser.parse_args()
 
-    # --- Config laden --------------------------------
     cfg    = load_config(args.pipeline)
-    dcfg   = cfg["dataset"]
-    vcfg   = cfg["visualization"]
     ocfg   = cfg["output"]
-    fusion = cfg["fusion"]
+    fusion_cfg = cfg["fusion"]
+    vcfg = cfg["visualization"] # Für den target_sample_token
 
-    # --- Dataset mit Noise (je nach Pipeline) --------
-    common = dict(
-        dataroot       = str(dcfg["dataroot"]),
-        version        = str(dcfg["version"]).strip(),
-        history_window = int(vcfg.get("history_window", 0)),
-        max_boxes      = int(dcfg.get("gt_max_boxes") or 0)
-    )
-    ds = TruckScenesDataset(**common,
-                             augment_noise_std=float(dcfg.get("augment_noise_std",0.0)))
+    tracks_json_path = ocfg.get("tracks_json", "/output/tracks.json")
+    output_fused_path = ocfg.get("fused_json", "/output/fused_detections.json") 
+    iou_th    = float(fusion_cfg.get("iou_threshold", 0.3))
 
-    cam_ch    = vcfg["camera_channel"]
-    start_idx = int(vcfg.get("sample_idx", 0))
-    nframes   = int(vcfg.get("num_frames", 1))
-    iou_th    = float(fusion.get("iou_threshold", 0.3))
+    print(f"INFO Stage 4: Lade Tracks aus {tracks_json_path}")
+    if not os.path.exists(tracks_json_path):
+        print(f"FEHLER: Tracks-Datei {tracks_json_path} nicht gefunden. Bitte zuerst Stage 3 ausführen.")
+        return
 
-    entries = []
-    # --- Für jedes zu rendernde Sample ----------------
-    for frame_idx in range(start_idx, start_idx + nframes):
-        item_curr   = ds[frame_idx]
-        curr_token  = item_curr["sample_token"]
-        ts_curr     = item_curr["timestamp"]
+    with open(tracks_json_path, 'r') as f:
+        # tracks.json enthält jetzt eine Liste mit EINEM Element:
+        # das Dictionary für den von Stage 3 verarbeiteten Ziel-Frame.
+        data_from_stage3 = json.load(f)
 
-        # 1) Transforms für den aktuellen Frame
-        calib_curr = item_curr["calibrated_sensor"][cam_ch]
-        q_s_curr   = Quaternion(calib_curr["rotation"])
-        E_curr     = transform_matrix(calib_curr["translation"],
-                                     q_s_curr,
-                                     inverse=False)  # sensor→ego
-        pose_curr  = item_curr["ego_pose"][cam_ch]
-        q_e_curr   = Quaternion(pose_curr["rotation"])
-        T_ego_curr = transform_matrix(pose_curr["translation"],
-                                      q_e_curr,
-                                      inverse=False)  # ego→world
+    if not data_from_stage3 or not isinstance(data_from_stage3, list) or len(data_from_stage3) == 0:
+        print(f"FEHLER: Tracks-Datei {tracks_json_path} ist leer oder hat ein unerwartetes Format.")
+        # Erstelle eine leere Output-Datei
+        with open(output_fused_path, "w") as f: json.dump([], f, indent=2)
+        print(f"✓ Stage 4: schrieb 0 Einträge → {output_fused_path} (Input-Tracks-Datei leer/falsch).")
+        return
 
-        # 2) Projiziere alle History‐Frames in den aktuellen Sensor‐Frame
-        all_proj = []
-        H = common["history_window"]
-        for h in range(1, H+1):
-            prev_idx = frame_idx - h
-            if prev_idx < 0:
-                break
-            item_prev = ds[prev_idx]
-            boxes_prev = item_prev["current"]  # (N,7)
-            if boxes_prev.size == 0:
-                continue
+    # Nimm das erste (und einzige) Element, das die Daten für den Ziel-Frame enthält
+    frame_data_for_fusion = data_from_stage3[0]
+    loaded_sample_token = frame_data_for_fusion.get("sample_token")
+    print(f"INFO Stage 4: Verarbeite Tracks aus Sample-Token: {loaded_sample_token}")
 
-            ts_prev   = item_prev["timestamp"]
-            dt        = (ts_curr - ts_prev) * 1e-6  # in Sekunden
+    # Optional: Überprüfe, ob dieser Token mit dem in der Visualisierungskonfig übereinstimmt
+    # (obwohl Stage 3 jetzt sicherstellen sollte, dass es der richtige ist)
+    # target_sample_idx_viz = vcfg.get("sample_idx", 0)
+    # from oft.data.dataset import TruckScenesDataset # Nur für Token-Lookup
+    # temp_ds = TruckScenesDataset(str(cfg["dataset"]["dataroot"]), str(cfg["dataset"]["version"]))
+    # expected_token_for_viz = temp_ds.samples[target_sample_idx_viz]
+    # if loaded_sample_token != expected_token_for_viz:
+    #     print(f"WARNUNG Stage 4: Geladener Sample-Token ({loaded_sample_token}) aus tracks.json "
+    #           f"stimmt nicht mit visualization.sample_idx ({target_sample_idx_viz} -> {expected_token_for_viz}) überein.")
 
-            # 2a) Transforms für Prev‐Frame
-            calib_prev = item_prev["calibrated_sensor"][cam_ch]
-            q_s_prev   = Quaternion(calib_prev["rotation"])
-            E_prev     = transform_matrix(calib_prev["translation"],
-                                          q_s_prev,
-                                          inverse=False)
-            pose_prev  = item_prev["ego_pose"][cam_ch]
-            q_e_prev   = Quaternion(pose_prev["rotation"])
-            T_ego_prev = transform_matrix(pose_prev["translation"],
-                                          q_e_prev,
-                                          inverse=False)
 
-            # 2b) Sensor→Welt
-            centers_prev = boxes_prev[:, :3]  # x,y,z
-            world_prev   = box_centers_sensor_to_world(
-                               centers_prev, E_prev, T_ego_prev)
+    tracks_for_nms = frame_data_for_fusion.get("tracks", [])
 
-            # 2c) Bewegungs‐Prognose
-            vel_prev = item_prev.get("velocities", None)
-            if vel_prev is not None:
-                world_prev = predict_world_centers(world_prev, vel_prev, dt)
+    if not tracks_for_nms:
+        print(f"INFO Stage 4: Keine Tracks im geladenen Frame ({loaded_sample_token}) für NMS vorhanden.")
+        fused_boxes_details = []
+    else:
+        print(f"INFO Stage 4: {len(tracks_for_nms)} Tracks werden für NMS vorbereitet.")
+        boxes_to_nms = np.array([track['box_world'] for track in tracks_for_nms]) 
+        scores_for_nms = np.array([track.get('hits', 1.0) for track in tracks_for_nms], dtype=np.float32)
 
-            # 2d) Welt→Sensor (aktueller Frame)
-            sensor_pred = box_centers_world_to_sensor(
-                              world_prev, E_curr, T_ego_curr)
+        # print(f"  Boxen für NMS (Shape): {boxes_to_nms.shape}")
+        # print(f"  Scores für NMS (Shape): {scores_for_nms.shape}")
+        # print(f"  Beispiel Box (erste): {boxes_to_nms[0].tolist() if len(boxes_to_nms) > 0 else 'N/A'}")
+        # print(f"  Beispiel Score (erster): {scores_for_nms[0] if len(scores_for_nms) > 0 else 'N/A'}")
+        # print(f"  IoU Threshold für NMS: {iou_th}")
 
-            # 2e) Rekonstruiere volle 7-Daten (w,l,h,yaw aus Prev)
-            dims_yaw = boxes_prev[:, 3:7]
-            proj     = np.hstack([sensor_pred, dims_yaw])  # (Ni,7)
-            all_proj.append(proj)
-
-        if not all_proj:
-            continue
-
-        # 3) NMS über alle projizierten Boxen
-        proj_boxes = np.vstack(all_proj)  # (ΣNi,7)
-        keep       = nms_bev_3d(proj_boxes, iou_threshold=iou_th)
-        fused      = proj_boxes[keep]
-
-        # 4) In JSON‐Format packen
-        for b in fused:
-            entries.append({
-                "sample_token": curr_token,
-                "translation": [float(b[0]), float(b[1]), float(b[2])],
-                "size":        [float(b[3]), float(b[4]), float(b[5])],
-                "rotation":    float(b[6])
+        keep_indices = nms_bev_3d(boxes_to_nms, scores_for_nms, iou_threshold=iou_th)
+        
+        fused_tracks_details = [tracks_for_nms[i] for i in keep_indices]
+        print(f"  Nach NMS: {len(fused_tracks_details)} Tracks/Boxen beibehalten.")
+        
+        fused_boxes_details = []
+        for kept_track_info in fused_tracks_details:
+            b_world = kept_track_info['box_world'] 
+            fused_boxes_details.append({
+                "sample_token": loaded_sample_token, 
+                "track_id": kept_track_info.get("track_id", -1), 
+                "translation_world": [float(b_world[0]), float(b_world[1]), float(b_world[2])],
+                "size_wlh":        [float(b_world[3]), float(b_world[4]), float(b_world[5])], 
+                "rotation_yaw_world":    float(b_world[6]),
+                "score_hits": float(kept_track_info.get("hits", 0)) 
             })
 
-    # --- Schreibe JSON ab ----------------------------
-    os.makedirs(os.path.dirname(ocfg["dets_json"]), exist_ok=True)
-    with open(ocfg["dets_json"], "w") as f:
-        json.dump(entries, f, indent=2)
+    output_dir_for_json = os.path.dirname(output_fused_path)
+    if not os.path.exists(output_dir_for_json) and output_dir_for_json:
+        os.makedirs(output_dir_for_json, exist_ok=True)
 
-    print(f"✓ Stage 4: wrote {len(entries)} entries → {ocfg['dets_json']}")
+    with open(output_fused_path, "w") as f:
+        json.dump(fused_boxes_details, f, indent=2, default=_to_json_serializable)
+
+    print(f"✓ Stage 4: wrote {len(fused_boxes_details)} fused entries → {output_fused_path}")
 
 if __name__ == "__main__":
     main()

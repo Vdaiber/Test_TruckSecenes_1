@@ -20,13 +20,14 @@ output:
   dets_json:             /output/fusion_detections.json
   fused_json:            /output/fused_detections.json
   fusion_dir:            /output/fusion_results
+  
 
   # Fusion‐Vergleichs‐Visuals (Stage 5)
   fusion_comparison_dir: /output/fusion_comparison
 
 visualization:
   scenes:            []            # [] = alle Szenen
-  sample_idx:        85            # Sample-Index für Vergleiche
+  sample_idx:        3            # Sample-Index für Vergleiche
   num_frames:        1             # Head-only per Szene
   history_window:    3             # History‐Fenster (für Tracking-Stage)
   batch_size:        2             # Batch‐Size (für DL‐Tests)
@@ -34,16 +35,16 @@ visualization:
 
 fusion:
   enabled:           true          # Fusion-Stage aktivieren
-  iou_threshold:     0.3           # NMS-Schwelle
+  iou_threshold:     0.1           # NMS-Schwelle
   score_threshold:   0.5           # (für später, wenn echte Scores kommen)
 
 tracking:
   enabled: true
-  iou_threshold: 0.25               # bleibt für NMS/Fusion
+  use_noisy_gt_as_input: true      #Wenn true, nutzt Stage 3 'dataset.augment_noise_std' für seine GT-Daten
+  min_hits_to_report: 3               # bleibt für NMS/Fusion
   temporal:
-    max_distance: 10.0
-    max_age: 3                # in Meter oder Bildkoords
-    
+    max_distance: 5.0
+    max_age: 3.0
 
 render:
   line_thickness:    2
