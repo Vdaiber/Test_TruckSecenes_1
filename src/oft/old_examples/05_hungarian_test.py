@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import numpy as np
-from oft.tracking.hungarian import hungarian_match
+from oft.tracking.old_hungarian import hungarian_match
 
 def main():
     # zwei projizierte Punkte und drei aktuelle

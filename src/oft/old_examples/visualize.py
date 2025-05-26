@@ -15,8 +15,8 @@ from oft.utils.config import load_config
 from oft.utils.common_utils import list_scenes
 
 # unsere Sub-Pipelines
-from oft.examples.visualize_ground_truth import run_ground_truth
-from oft.examples.visualize_fusion       import run_fusion
+from oft.old_examples.visualize_ground_truth import run_ground_truth
+from oft.old_examples.visualize_fusion       import run_fusion
 
 
 def main():

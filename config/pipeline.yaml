@@ -3,52 +3,82 @@
 dataset:
   dataroot:         /data
   version:          v1.0-mini
-  augment_noise_std: 0.2            # Std für Gaussian-Noise (>0 aktiviert Noise-Stage)
-  gt_max_boxes:     null           # null = dynamisch pro Batch
+  augment_noise_std: 0.2            # Basis-Std für Gaussian-Noise (genutzt von Dataset und A0_generate_simulated_detections)
+  gt_max_boxes:     null           # null = dynamisch pro Batch (für Dataset-Loader, falls Padding nötig)
 
 output:
-  # Ground‐truth–Visuals (Stage 1)
-  ground_truth_dir:      /output/examples_gt
-
-  # Noise‐Visuals (Stage 2)
-  noise_comparison_dir:  /output/noise_comparison
-
-  # Tracking (Stage 3)
-  tracks_json:           /output/tracks.json
-
-  # Fusion (Stage 4)
-  dets_json:             /output/fusion_detections.json
-  fused_json:            /output/fused_detections.json
-  fusion_dir:            /output/fusion_results
+  # Stage 1: Ground‐truth–Visuals
+  ground_truth_dir:      /output/stage1_gt_visualization 
+  # Stage 2: Noise‐Visuals
+  noise_comparison_dir:  /output/stage2_noise_visualization 
   
-
-  # Fusion‐Vergleichs‐Visuals (Stage 5)
-  fusion_comparison_dir: /output/fusion_comparison
+  # Stage 3: Tracking Output
+  tracks_json:           /output/tracks.json 
+  
+  # A0_generate_simulated_detections.py: Output Verzeichnis
+  simulated_detections_dir: /output/simulated_detections
+  
+  # Stage 4: Fusion Output (NMS auf simulierten Roh-Daten)
+  fused_simulated_json:  /output/fused_simulated_detections.json 
+  
+  # Stage 5: Fusion‐Vergleichs‐Visuals
+  fusion_comparison_dir: /output/stage5_fusion_comparison
 
 visualization:
-  scenes:            []            # [] = alle Szenen
-  sample_idx:        3            # Sample-Index für Vergleiche
-  num_frames:        1             # Head-only per Szene
-  history_window:    3             # History‐Fenster (für Tracking-Stage)
-  batch_size:        2             # Batch‐Size (für DL‐Tests)
+  scenes:            []            # Für Stage 1/2, wenn über alle Szenen iteriert wird (aktuell nicht genutzt)
+  sample_idx:        97             # Ziel-Sample-Index für A0, Stage 3 (Output), Stage 4 (Input), Stage 5 (Visualisierung)
+  num_frames:        3             # Für Stage 3: Wie viele Frames *bis zum* target_sample_idx verarbeitet werden,
+                                 # um Tracks mit genügend `hits` zu bekommen. Sollte >= min_hits_to_report sein,
+                                 # und die Schleife in Stage 3 läuft bis `sample_idx`.
+                                 # Für Stage 1/2: Könnte Anzahl der zu visualisierenden Frames pro Szene sein.
+  history_window:    3             # Für TruckScenesDataset: Anzahl der vergangenen Frames in item["history"],
+                                 # wird zur Berechnung von item["velocities"] verwendet.
   camera_channel:    CAMERA_LEFT_FRONT
 
-fusion:
-  enabled:           true          # Fusion-Stage aktivieren
-  iou_threshold:     0.1           # NMS-Schwelle
-  score_threshold:   0.5           # (für später, wenn echte Scores kommen)
+# Konfiguration für A0_generate_simulated_detections.py
+simulation:
+  enabled: true 
+  sources: 
+    sensor_gt_clean_dropout:
+      output_file: "sim_gt_clean_dropout.json" 
+      noise_std_multiplier: 0.0 # Kein Rauschen für diese Quelle
+      dropout_rate: 0.6 # Starker Dropout
+      score: 0.95       
+    sensor_gt_noisy_A:
+      output_file: "sim_gt_noisy_A.json"
+      noise_std_multiplier: 2.5 # Starkes Rauschen
+      dropout_rate: 0.2 
+      score: 0.65 
+    sensor_gt_noisy_B_dropout:
+      output_file: "sim_gt_noisy_B_dropout.json"
+      noise_std_multiplier: 3.5 # Sehr starkes Rauschen
+      dropout_rate: 0.4 
+      score: 0.45 
 
+# Konfiguration für Stage 4 (Fusion)
+fusion:
+  enabled:           true          
+  iou_threshold:     0.1           # NMS-Schwelle für NMS auf simulierten Daten
+  # score_threshold:   0.5         # Wird von nms_bev_3d aktuell nicht als Filter verwendet, nur zur Sortierung
+  
+  # Definiert, welche der simulierten Outputs für die Fusion in Stage 4 genutzt werden
+  active_simulated_sources_for_fusion: 
+    - "sensor_gt_clean_dropout"
+    - "sensor_gt_noisy_A"
+    - "sensor_gt_noisy_B_dropout"
+
+# Konfiguration für Stage 3 (Tracking)
 tracking:
   enabled: true
-  use_noisy_gt_as_input: true      #Wenn true, nutzt Stage 3 'dataset.augment_noise_std' für seine GT-Daten
-  min_hits_to_report: 3               # bleibt für NMS/Fusion
+  use_noisy_gt_as_input: true      # Stage 3 nutzt GT-Daten, die mit dataset.augment_noise_std verrauscht wurden
+  min_hits_to_report: 3            # Mindestanzahl an Matches, damit ein Track ausgegeben wird
   temporal:
-    max_distance: 5.0
-    max_age: 3.0
+    max_distance: 5.0              # Maximale Distanz für Hungarian Match im Tracker
+    max_age: 3                     # Wie viele Frames ein Track ungematcht überlebt
 
-render:
+render: # Für Visualisierungen in Stage 1, 2, 5
   line_thickness:    2
   color_mode:        category
   custom_colormap:   null
-  z_threshold:       0.1
+  z_threshold:       0.1           # Für Frustum Culling in der Visualisierung
   box_visibility:    ANY

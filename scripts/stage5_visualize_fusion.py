@@ -37,7 +37,7 @@ def try_load_image(path):
         return None
 
 def main():
-    parser = argparse.ArgumentParser(description="Stage 5: Visualize Fusion Results vs Ground Truth")
+    parser = argparse.ArgumentParser(description="Stage 5: Visualize Fused Simulated Detections vs Ground Truth")
     parser.add_argument("-c", "--pipeline", required=False, 
                         default="config/pipeline.yaml", 
                         help="Pfad zur pipeline.yaml. Standard: config/pipeline.yaml im CWD.")
@@ -48,7 +48,7 @@ def main():
     dcfg  = cfg["dataset"]
     vcfg  = cfg["visualization"]
     ocfg  = cfg["output"]
-    render_cfg = cfg.get("render", {}) # Hole render config
+    render_cfg = cfg.get("render", {}) 
     cam_ch = vcfg["camera_channel"]
 
     sample_idx_to_visualize = vcfg.get("sample_idx", 0)
@@ -59,7 +59,7 @@ def main():
         dataroot       = dcfg["dataroot"],
         version        = dcfg["version"].strip(),
         history_window = 0, 
-        max_boxes      = int(dcfg.get("gt_max_boxes") or 0), # Nutze gt_max_boxes oder 0
+        max_boxes      = int(dcfg.get("gt_max_boxes") or 0), 
         augment_noise_std = 0.0 
     )
     if sample_idx_to_visualize >= len(temp_ds_for_gt.samples):
@@ -94,18 +94,16 @@ def main():
     gt_boxes = [ ts.get_box(ann_token) for ann_token in samp["anns"] ]
     print(f"  {len(gt_boxes)} saubere GT-Boxen geladen.")
 
-    fused_input_json_path = ocfg.get("fused_json", ocfg.get("dets_json")) 
-    if not fused_input_json_path: 
-        fused_input_json_path = "/output/fused_detections.json" 
-        print(f"WARNUNG: Weder 'fused_json' noch 'dets_json' in output config gefunden. Verwende Fallback: {fused_input_json_path}")
-
-    print(f"  Lade fusionierte Detektionen aus: {fused_input_json_path}")
+    # Lade Fusions-Detektionen aus Stage 4 (jetzt die fusionierten simulierten Daten)
+    fused_input_json_path = ocfg.get("fused_simulated_json", "/output/fused_simulated_detections.json") 
+    
+    print(f"  Lade fusionierte simulierte Detektionen aus: {fused_input_json_path}")
     if not os.path.exists(fused_input_json_path):
-        print(f"FEHLER: Fusions-Datei {fused_input_json_path} nicht gefunden. Bitte zuerst Stage 4 ausführen.")
+        print(f"FEHLER: Fusions-Datei {fused_input_json_path} nicht gefunden. Bitte zuerst Stage 4 (mit simulierten Daten) ausführen.")
         return
         
     with open(fused_input_json_path, "r") as f:
-        fused_box_data_list_from_stage4 = json.load(f) 
+        fused_box_data_list_from_stage4 = json.load(f) # Dies ist eine flache Liste von Box-Dictionaries
 
     fus_boxes = [] 
     if not fused_box_data_list_from_stage4:
@@ -113,7 +111,7 @@ def main():
     else:
         num_total_fused_boxes_in_file = len(fused_box_data_list_from_stage4)
         for d in fused_box_data_list_from_stage4:
-            if d.get("sample_token") == current_sample_token:
+            if d.get("sample_token") == current_sample_token: # Sicherstellen, dass es der richtige Frame ist
                 world_translation = d.get("translation_world", [0,0,0]) 
                 world_size_wlh = d.get("size_wlh", [1,1,1]) 
                 world_yaw = d.get("rotation_yaw_world", 0.0) 
@@ -123,7 +121,7 @@ def main():
                     size=world_size_wlh, 
                     orientation=Quaternion(axis=[0,0,1], angle=world_yaw), 
                     name="fused_object", 
-                    score=d.get("score_final_for_nms", d.get("score_hits", 1.0)) 
+                    score=d.get("fusion_score", 1.0) # Score aus der Fusionsdatei
                 )
                 fus_boxes.append(fused_box_obj)
         
@@ -131,7 +129,7 @@ def main():
              print(f"  WARNUNG: Die Datei {fused_input_json_path} enthält {num_total_fused_boxes_in_file} Boxen, "
                   f"aber keine für den aktuell zu visualisierenden Token ({current_sample_token}).")
 
-        print(f"  {len(fus_boxes)} fusionierte Boxen für Visualisierung vorbereitet (für Sample {current_sample_token}).")
+        print(f"  {len(fus_boxes)} fusionierte simulierte Boxen für Visualisierung vorbereitet (für Sample {current_sample_token}).")
 
     original_class_colors = CLASS_COLORS.copy() 
     CLASS_COLORS.clear()
@@ -141,12 +139,12 @@ def main():
     for gt_box in gt_boxes: 
         gt_box.name = "ground_truth"
 
-    # Reset debug flags before drawing
+    # Reset debug flags
     global _debug_printed_gt, _debug_printed_fused
     _debug_printed_gt = False
     _debug_printed_fused = False
 
-    print(f"  Zeichne GT-Boxen (grün) und fusionierte Boxen (blau)...")
+    print(f"  Zeichne GT-Boxen (grün) und fusionierte simulierte Boxen (blau)...")
     img_with_gt = draw_boxes_on_image(
         image=img, 
         boxes=gt_boxes, 
@@ -154,7 +152,7 @@ def main():
         world_to_sensor_transform=H_world_to_sensor, 
         line_thickness=render_cfg.get("line_thickness", 2),
         z_threshold=render_cfg.get("z_threshold", 0.1),
-        box_type_for_debug="gt" # NEU
+        box_type_for_debug="gt"
     )
     img_with_all_boxes = draw_boxes_on_image(
         image=img_with_gt, 
@@ -163,16 +161,16 @@ def main():
         world_to_sensor_transform=H_world_to_sensor, 
         line_thickness=render_cfg.get("line_thickness", 2),
         z_threshold=render_cfg.get("z_threshold", 0.1),
-        box_type_for_debug="fused" # NEU
+        box_type_for_debug="fused"
     )
 
     CLASS_COLORS.clear()
-    CLASS_COLORS.update(original_class_colors) 
+    CLASS_COLORS.update(original_class_colors)
 
     output_comparison_dir = ocfg.get("fusion_comparison_dir", "/output/stage5_fusion_comparison")
     os.makedirs(output_comparison_dir, exist_ok=True)
     
-    output_filename = f"{current_sample_token}_fusion_vs_gt.jpg"
+    output_filename = f"{current_sample_token}_sim_fusion_vs_gt.jpg" # Neuer Dateiname für Klarheit
     full_output_path = os.path.join(output_comparison_dir, output_filename)
     
     cv2.imwrite(full_output_path, img_with_all_boxes)
