@@ -24,9 +24,14 @@ output:
   # Stage 5: Fusion‐Vergleichs‐Visuals
   fusion_comparison_dir: /output/stage5_fusion_comparison
 
+  intermediate_tracks_dir_B1: /output/intermediate_tracks # Pfad, den B1 nutzt
+  final_fused_tracks_dir_B2:  /output/final_fused_tracks  # Neuer Pfad für B2 Ergebnisse
+  b3_visualization_dir: /output/stageB3_adv_fusion_vs_gt 
+
+
 visualization:
   scenes:            []            # Für Stage 1/2, wenn über alle Szenen iteriert wird (aktuell nicht genutzt)
-  sample_idx:        97             # Ziel-Sample-Index für A0, Stage 3 (Output), Stage 4 (Input), Stage 5 (Visualisierung)
+  sample_idx:        135             # Ziel-Sample-Index für A0, Stage 3 (Output), Stage 4 (Input), Stage 5 (Visualisierung)
   num_frames:        3             # Für Stage 3: Wie viele Frames *bis zum* target_sample_idx verarbeitet werden,
                                  # um Tracks mit genügend `hits` zu bekommen. Sollte >= min_hits_to_report sein,
                                  # und die Schleife in Stage 3 läuft bis `sample_idx`.
@@ -58,7 +63,8 @@ simulation:
 # Konfiguration für Stage 4 (Fusion)
 fusion:
   enabled:           true          
-  iou_threshold:     0.1           # NMS-Schwelle für NMS auf simulierten Daten
+  iou_threshold:     0.1  
+  track_to_track_max_dist: 2.0         # NMS-Schwelle für NMS auf simulierten Daten
   # score_threshold:   0.5         # Wird von nms_bev_3d aktuell nicht als Filter verwendet, nur zur Sortierung
   
   # Definiert, welche der simulierten Outputs für die Fusion in Stage 4 genutzt werden

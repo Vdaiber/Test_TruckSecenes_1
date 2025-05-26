@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import shutil, os
 from oft.utils.config import load_config
-from oft.examples.visualize_fusion_comparison import main as viz_fusion
-from oft.examples.visualize_noise_comparison   import main as viz_noise
+from oft.old_examples.visualize_fusion_comparison import main as viz_fusion
+from oft.old_examples.visualize_noise_comparison   import main as viz_noise
 
 cfg   = load_config()
 out_n = cfg["output"]["noise_comparison_dir"]
