@@ -5,132 +5,83 @@ import os
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional # Optional und Tuple hier hinzugefügt
-from pyquaternion import Quaternion # Für die Umwandlung von Yaw in Quaternion
+from typing import List, Dict, Any, Tuple, Optional, Callable
+from pyquaternion import Quaternion
 
-# Interne Projekt-Imports
 from oft.utils.config import load_config
-from oft.data.dataset import TruckScenesDataset # Um GT-Daten und Kamerainfos zu laden
-from truckscenes import TruckScenes # Für den Zugriff auf ts.get_box und ts.get_sample_data
-from truckscenes.utils.data_classes import Box as DevBox # Die Box-Klasse des Devkits
-from truckscenes.utils.geometry_utils import view_points # Für Transformationen und Projektion
-# Importiere _EDGES und CLASS_COLORS aus deiner visualization.py
-# Stelle sicher, dass der Pfad korrekt ist und oft.utils.visualization existiert
-from oft.utils.visualization import CLASS_COLORS as DEFAULT_CLASS_COLORS, _EDGES 
+from truckscenes import TruckScenes
+from truckscenes.utils.data_classes import Box as DevBox
+from truckscenes.utils.geometry_utils import view_points, BoxVisibility
+from oft.utils.visualization import CLASS_COLORS as DEFAULT_CLASS_COLORS, _EDGES, draw_boxes_on_image as draw_devkit_style_boxes_on_image
 
-# Definieren wir Farben für die Visualisierung
-COLOR_GT = (0, 255, 0)      # Grün für Ground Truth
-COLOR_FUSED = (255, 0, 0)   # Blau für fusionierte Tracks (Standard)
-COLOR_FUSED_MULTI_SENSOR = (255, 165, 0) # Orange für Tracks aus >1 Sensor (optional)
+COLOR_GT_STAGE1_STYLE = (0, 255, 0)
+COLOR_FUSED = (255, 0, 0)
+COLOR_FUSED_MULTI_SENSOR = (255, 165, 0)
 
-# Verwende die importierten CLASS_COLORS, falls vorhanden, sonst Fallback
-CLASS_COLORS = DEFAULT_CLASS_COLORS if DEFAULT_CLASS_COLORS else {
-    "vehicle.car": (0, 0, 255), # Rot für Auto als Beispiel
-    "human.pedestrian.adult": (255, 0, 0), # Blau für Fußgänger
-    "default_obj": (128, 128, 128), # Grau als Default
-}
-
+CLASS_COLORS = DEFAULT_CLASS_COLORS if DEFAULT_CLASS_COLORS else {}
 
 def world_box_dict_to_devbox(box_dict: Dict[str, Any], default_name="fused") -> DevBox:
-    """
-    Konvertiert ein Track-Dictionary (mit Weltkoordinaten) in ein DevBox-Objekt.
-    """
     center = box_dict.get("box_world", [0,0,0,0,0,0,0])[:3]
-    size = box_dict.get("box_world", [0,0,0,0,0,0,0])[3:6] # w, l, h
+    size = box_dict.get("box_world", [0,0,0,0,0,0,0])[3:6] 
     yaw = box_dict.get("box_world", [0,0,0,0,0,0,0])[6]
-    
-    # Konvertiere Yaw in Quaternion
     orientation = Quaternion(axis=[0, 0, 1], angle=yaw)
     
-    # Name für DevBox
     name_to_use = default_name
     num_contrib = box_dict.get("num_fused_tracks", 0)
     contrib_sensors = box_dict.get("contributing_sensors", [])
     
-    if num_contrib == 1 and contrib_sensors:
+    if "detection_name" in box_dict: 
+        name_to_use = box_dict["detection_name"]
+    elif num_contrib == 1 and contrib_sensors:
         name_to_use = f"fused_{contrib_sensors[0]}"
     elif num_contrib > 1:
         name_to_use = f"fused_{num_contrib}sensors"
     
-    final_name_for_devbox = box_dict.get("detection_name", name_to_use) 
-    # Versuche, den 'detection_name' aus dem Track zu verwenden, wenn er existiert und num_fused_tracks = 1 ist.
-    # Dies setzt voraus, dass B1 'detection_name' in seine Tracks schreibt oder B2 es für nicht-fusionierte Tracks beibehält.
-    if num_contrib == 1 and "detection_name" in box_dict:
-         final_name_for_devbox = box_dict["detection_name"]
-
-
     token = str(box_dict.get("track_id", "fused_track_" + str(np.random.randint(10000))))
+    return DevBox(center=center, size=size, orientation=orientation, name=name_to_use, token=token)
 
-    return DevBox(center=center, size=size, orientation=orientation, name=final_name_for_devbox, token=token)
-
-def draw_world_boxes_on_image_custom(
+def draw_world_boxes_custom_text(
     image: np.ndarray,
     world_boxes: List[DevBox], 
     K: np.ndarray, 
     world_to_sensor_transform: np.ndarray, 
-    color_override: Optional[Tuple[int, int, int]] = None, 
-    default_color: Tuple[int, int, int] = (128, 128, 128), 
+    box_color: Tuple[int, int, int],
     thickness: int = 2,
     z_threshold: float = 0.1,
-    text_to_display_fn: Optional[callable] = None # callable hinzugefügt
+    text_fn: Optional[Callable[[DevBox, int], str]] = None 
 ):
-    """
-    Zeichnet 3D-Boxen (gegeben in Weltkoordinaten) auf ein Bild.
-    Transformiert die Box-Ecken zuerst in den Kamera-Koordinatenraum.
-    """
     img_out = image.copy()
-    
     for i, box in enumerate(world_boxes):
-        corners_world = box.corners()  # (3,8)
-
+        corners_world = box.corners()
         corners_world_h = np.vstack((corners_world, np.ones((1, 8)))) 
         corners_sensor_h = world_to_sensor_transform @ corners_world_h
         corners_sensor = corners_sensor_h[:3, :] 
-
-        pts_projected = view_points(corners_sensor, K, normalize=True)  # (3,8)
+        pts_projected = view_points(corners_sensor, K, normalize=True)
         xs, ys, zs = pts_projected
-
-        if np.all(zs <= z_threshold): 
-            continue
-
-        current_box_color_bgr = default_color
-        if color_override:
-            current_box_color_bgr = color_override
-        else:
-            # Farbe aus DevKit-Colormap basierend auf box.name
-            # Stelle sicher, dass box.name ein String ist
-            box_name_str = str(box.name) if box.name is not None else "default_obj"
-            rgb_from_map = CLASS_COLORS.get(box_name_str, CLASS_COLORS.get(box_name_str.split('.')[0], None)) # Versuche auch Basis-Kategorie
-            if rgb_from_map: 
-                current_box_color_bgr = (int(rgb_from_map[2]), int(rgb_from_map[1]), int(rgb_from_map[0]))
-            elif box_name_str not in CLASS_COLORS: # Fallback, wenn Name nicht in Map
-                 current_box_color_bgr = default_color
-
-
+        if np.all(zs <= z_threshold): continue
         
         for k_edge, j_edge in _EDGES:
             if zs[k_edge] > z_threshold and zs[j_edge] > z_threshold:
                 p1 = (int(xs[k_edge]), int(ys[k_edge]))
                 p2 = (int(xs[j_edge]), int(ys[j_edge]))
-                cv2.line(img_out, p1, p2, current_box_color_bgr, thickness, cv2.LINE_AA)
+                cv2.line(img_out, p1, p2, box_color, thickness, cv2.LINE_AA)
         
-        if text_to_display_fn:
-            text = text_to_display_fn(box, i) 
+        if text_fn:
+            text = text_fn(box, i) 
             text_anchor_candidates = []
             for corner_idx in range(8):
                  if zs[corner_idx] > z_threshold and \
                     0 <= xs[corner_idx] < img_out.shape[1] and \
                     0 <= ys[corner_idx] < img_out.shape[0]:
                     text_anchor_candidates.append((int(xs[corner_idx]), int(ys[corner_idx])))
-            
             if text_anchor_candidates:
                 text_anchor = min(text_anchor_candidates, key=lambda p: p[1])
-                cv2.putText(img_out, text, (text_anchor[0], text_anchor[1] - 7), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, current_box_color_bgr, thickness, cv2.LINE_AA)
+                cv2.putText(img_out, text, (text_anchor[0] + 3, text_anchor[1] - 7), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, box_color, 1, cv2.LINE_AA)
     return img_out
 
 def main():
-    parser = argparse.ArgumentParser(description="B3: Visualize Advanced Fusion vs Ground Truth")
+    parser = argparse.ArgumentParser(description="B3: Visualize Advanced Fusion vs Filtered Ground Truth")
     parser.add_argument("-c", "--pipeline", required=False, default="config/pipeline.yaml",
                         help="Pfad zur pipeline.yaml.")
     args = parser.parse_args()
@@ -162,50 +113,49 @@ def main():
     print(f"INFO B3: Visualisiere für Sample-Token: {target_sample_token} (Index: {target_sample_idx})")
 
     if camera_channel not in target_sample_record["data"]:
-        print(f"FEHLER B3: Kamera-Kanal '{camera_channel}' nicht im Sample {target_sample_token} gefunden. Verfügbare Kanäle: {list(target_sample_record['data'].keys())}")
+        print(f"FEHLER B3: Kamera-Kanal '{camera_channel}' nicht im Sample {target_sample_token} gefunden.")
         return
     
     sd_token = target_sample_record["data"][camera_channel]
     sd_record = ts.get("sample_data", sd_token)
     
     image_path = Path(ts.dataroot) / sd_record["filename"]
-    if not image_path.is_file():
-        print(f"FEHLER B3: Bilddatei nicht gefunden: {image_path}")
-        return
-    image = cv2.imread(str(image_path))
-    if image is None:
+    base_image = cv2.imread(str(image_path)) # Lade das Originalbild
+    if base_image is None:
         print(f"FEHLER B3: Konnte Bild nicht laden von: {image_path}")
         return
 
     calibrated_sensor_record = ts.get("calibrated_sensor", sd_record["calibrated_sensor_token"])
     ego_pose_record = ts.get("ego_pose", sd_record["ego_pose_token"])
+    K_matrix = np.array(calibrated_sensor_record["camera_intrinsic"])
     
-    K = np.array(calibrated_sensor_record["camera_intrinsic"])
-    
-    # Welt-zu-Sensor Transformation für die Kamera
     ego_from_world_rotation = Quaternion(ego_pose_record['rotation']).inverse
     ego_from_world_translation = -ego_from_world_rotation.rotate(np.array(ego_pose_record['translation']))
     world_to_ego_transform = ego_from_world_rotation.transformation_matrix
     world_to_ego_transform[:3, 3] = ego_from_world_translation
-
     sensor_from_ego_rotation = Quaternion(calibrated_sensor_record['rotation']).inverse
     sensor_from_ego_translation = -sensor_from_ego_rotation.rotate(np.array(calibrated_sensor_record['translation']))
     ego_to_sensor_transform = sensor_from_ego_rotation.transformation_matrix
     ego_to_sensor_transform[:3, 3] = sensor_from_ego_translation
-    
     world_to_sensor_transform = ego_to_sensor_transform @ world_to_ego_transform
 
-    # --- Ground Truth Boxen laden und vorbereiten ---
-    gt_devboxes_world: List[DevBox] = []
-    for ann_token in target_sample_record["anns"]:
-        gt_box_world = ts.get_box(ann_token) 
-        gt_devboxes_world.append(gt_box_world)
-    print(f"  {len(gt_devboxes_world)} Ground Truth Boxen geladen.")
+    box_vis_config = render_cfg.get("box_visibility", "ANY")
+    try:
+        visibility_filter = BoxVisibility[box_vis_config.upper()]
+    except KeyError:
+        visibility_filter = BoxVisibility.ANY
+    
+    try:
+        _, gt_boxes_cam_filtered, _ = ts.get_sample_data(sd_token, box_vis_level=visibility_filter)
+    except Exception as e:
+        print(f"FEHLER B3 beim Aufruf von ts.get_sample_data für sd_token {sd_token}: {e}")
+        gt_boxes_cam_filtered = []
+    
+    print(f"  {len(gt_boxes_cam_filtered)} Ground Truth Boxen (Stage1-Style, gefiltert, Kamera-Koord.) geladen.")
 
-    # --- Fusionierte Tracks laden und vorbereiten ---
     fused_tracks_file = final_fused_tracks_dir / f"fused_tracks_advanced_target_{target_sample_token}.json"
     fused_devboxes_world: List[DevBox] = []
-    fused_tracks_data_from_file_for_text = [] # Um die Original-Dicts für Text zu behalten
+    fused_tracks_data_for_text = [] 
     if fused_tracks_file.is_file():
         with open(fused_tracks_file, 'r') as f:
             fused_tracks_data_from_file_for_text = json.load(f)
@@ -214,73 +164,77 @@ def main():
                 dev_box = world_box_dict_to_devbox(track_dict)
                 fused_devboxes_world.append(dev_box)
             except Exception as e:
-                print(f"WARNUNG B3: Fehler beim Konvertieren des fusionierten Tracks in DevBox: {e} - Track: {track_dict.get('track_id')}")
-        print(f"  {len(fused_devboxes_world)} fusionierte Tracks geladen und in DevBox konvertiert.")
+                print(f"WARNUNG B3: Fehler beim Konvertieren des fusionierten Tracks '{track_dict.get('unique_id_before_fusion', track_dict.get('track_id'))}' in DevBox: {e}")
+        print(f"  {len(fused_devboxes_world)} fusionierte Tracks geladen und in Welt-DevBox konvertiert.")
     else:
         print(f"WARNUNG B3: Datei mit fusionierten Tracks nicht gefunden: {fused_tracks_file}")
 
     # --- Boxen auf Bild zeichnen ---
-    image_with_gt = draw_world_boxes_on_image_custom(
-        image.copy(), 
-        gt_devboxes_world,
-        K,
-        world_to_sensor_transform,
-        color_override=COLOR_GT, 
-        thickness=render_cfg.get("line_thickness", 2),
-        z_threshold=render_cfg.get("z_threshold", 0.1),
-        text_to_display_fn=lambda box, idx: f"GT_{box.name.split('.')[-1] if isinstance(box.name, str) else 'GT'}"
-    )
-    
-    # Funktion, um Text für fusionierte Boxen zu generieren
-    # Diese Funktion greift auf fused_tracks_data_from_file_for_text aus dem äußeren Scope zu.
-    def get_fused_track_text(devbox: DevBox, track_idx_in_current_list: int):
-        original_track_dict = None
-        # Finde das passende Dictionary in der Liste der geladenen Tracks.
-        # Der DevBox-Token wurde aus der track_id des Dictionaries erstellt.
-        for trk_dict in fused_tracks_data_from_file_for_text:
-            # Erstelle den erwarteten Token-String aus dem Dictionary zum Vergleich
-            expected_token = str(trk_dict.get("track_id", ""))
-            if devbox.token == expected_token or devbox.token == f"fused_track_{expected_token}":
-                original_track_dict = trk_dict
+    # Erstelle eine Kopie des Originalbilds für die kombinierte Darstellung
+    image_to_draw_on = base_image.copy()
+
+    # 1. Zeichne die (Stage1-gefilterten) GT-Boxen
+    if gt_boxes_cam_filtered:
+        original_colors = CLASS_COLORS.copy()
+        temp_gt_color_name = "gt_b3_viz_filtered"
+        for box in gt_boxes_cam_filtered: 
+            box.name = temp_gt_color_name 
+        CLASS_COLORS.clear() 
+        CLASS_COLORS[temp_gt_color_name] = (0, 255, 0) # Grün für GT (RGB)
+
+        # draw_devkit_style_boxes_on_image zeichnet auf das übergebene Bild und gibt es zurück
+        image_to_draw_on = draw_devkit_style_boxes_on_image(
+            image_to_draw_on, # Zeichne auf die aktuelle Version des Bildes
+            gt_boxes_cam_filtered, 
+            K_matrix,
+            z_threshold=render_cfg.get("z_threshold", 0.1), 
+            thickness=render_cfg.get("line_thickness", 2)
+        )
+        CLASS_COLORS.clear(); CLASS_COLORS.update(original_colors)
+    else:
+        print("INFO B3: Keine GT-Boxen nach Filterung zum Zeichnen vorhanden.")
+
+    # 2. Zeichne die fusionierten Boxen auf dasselbe Bild
+    def get_fused_track_text(devbox_for_text: DevBox, track_idx_in_list: int):
+        original_track_dict_for_text = None
+        for trk_dict_search in fused_tracks_data_from_file_for_text:
+            expected_token_from_dict = str(trk_dict_search.get("track_id", -1))
+            devbox_token_base = devbox_for_text.token.replace("fused_track_", "")
+            if devbox_token_base == expected_token_from_dict:
+                original_track_dict_for_text = trk_dict_search
                 break
-        
-        if original_track_dict:
-            score_text = f"{original_track_dict.get('confidence_score',0.0):.2f}"
-            num_contrib_text = f"N{original_track_dict.get('num_fused_tracks',1)}"
-            # Verwende den Namen aus der DevBox, der in world_box_dict_to_devbox generiert wurde
-            name_text = str(devbox.name).split('_')[-1] if 'fused_' in str(devbox.name) else str(devbox.name)
+        if original_track_dict_for_text:
+            score_text = f"{original_track_dict_for_text.get('confidence_score',0.0):.2f}"
+            num_contrib_text = f"N{original_track_dict_for_text.get('num_fused_tracks',1)}"
+            name_text = str(devbox_for_text.name)
             return f"F_{name_text}_{score_text}_{num_contrib_text}"
-        return f"F_{str(devbox.name)}"
+        return f"F_{str(devbox_for_text.name)}"
 
-
-    image_with_all_boxes = image_with_gt.copy() 
-    for i, fused_box in enumerate(fused_devboxes_world):
-        original_track_dict = None
-        for trk_dict in fused_tracks_data_from_file_for_text:
-            expected_token = str(trk_dict.get("track_id", ""))
-            if fused_box.token == expected_token or fused_box.token == f"fused_track_{expected_token}":
-                original_track_dict = trk_dict
+    for i, fused_world_box_instance in enumerate(fused_devboxes_world):
+        original_track_dict_for_color = None
+        for trk_dict_search_color in fused_tracks_data_from_file_for_text:
+            expected_token_color = str(trk_dict_search_color.get("track_id", -1))
+            fused_box_token_base = fused_world_box_instance.token.replace("fused_track_", "")
+            if fused_box_token_base == expected_token_color:
+                original_track_dict_for_color = trk_dict_search_color
                 break
         
         current_color = COLOR_FUSED 
-        if original_track_dict and original_track_dict.get("num_fused_tracks", 1) > 1:
+        if original_track_dict_for_color and original_track_dict_for_color.get("num_fused_tracks", 1) > 1:
             current_color = COLOR_FUSED_MULTI_SENSOR 
 
-        image_with_all_boxes = draw_world_boxes_on_image_custom(
-            image_with_all_boxes, [fused_box], K, world_to_sensor_transform,
-            color_override=current_color, 
+        image_to_draw_on = draw_world_boxes_custom_text( 
+            image_to_draw_on, [fused_world_box_instance], K_matrix, world_to_sensor_transform,
+            box_color=current_color, 
             thickness=render_cfg.get("line_thickness", 2),
             z_threshold=render_cfg.get("z_threshold", 0.1),
-            # Übergabe des Index 'i' an die Lambda-Funktion, damit get_fused_track_text
-            # das korrekte Element aus fused_tracks_data_from_file_for_text verwenden kann, falls nötig.
-            # Aber get_fused_track_text sucht jetzt selbstständig.
-            text_to_display_fn=lambda b, idx_lambda, current_box_obj=fused_box: get_fused_track_text(current_box_obj, i)
+            text_fn=lambda b, idx_lambda, current_box_obj_for_text=fused_world_box_instance: get_fused_track_text(current_box_obj_for_text, i)
         )
 
     # --- Bild speichern ---
     output_image_filename = f"B3_fused_vs_gt_{target_sample_token}_{camera_channel}.jpg"
     output_image_path = b3_output_dir / output_image_filename
-    cv2.imwrite(str(output_image_path), image_with_all_boxes)
+    cv2.imwrite(str(output_image_path), image_to_draw_on) # Speichere das finale Bild
     print(f"INFO B3: Visualisierung gespeichert unter: {output_image_path}")
     print(f"✓ B3: Visualisierung abgeschlossen.")
 

@@ -51,12 +51,12 @@ simulation:
       score: 0.95       
     sensor_gt_noisy_A:
       output_file: "sim_gt_noisy_A.json"
-      noise_std_multiplier: 2.5 # Starkes Rauschen
+      noise_std_multiplier: 1.0 # Starkes Rauschen
       dropout_rate: 0.2 
       score: 0.65 
     sensor_gt_noisy_B_dropout:
       output_file: "sim_gt_noisy_B_dropout.json"
-      noise_std_multiplier: 3.5 # Sehr starkes Rauschen
+      noise_std_multiplier: 1.5 # Sehr starkes Rauschen
       dropout_rate: 0.4 
       score: 0.45 
 
@@ -65,6 +65,7 @@ fusion:
   enabled:           true          
   iou_threshold:     0.1  
   track_to_track_max_dist: 2.0         # NMS-Schwelle für NMS auf simulierten Daten
+  min_confidence_for_b2_input: 0.3 # NEU - Teste Werte wie 0.3, 0.4 oder 0.5
   # score_threshold:   0.5         # Wird von nms_bev_3d aktuell nicht als Filter verwendet, nur zur Sortierung
   
   # Definiert, welche der simulierten Outputs für die Fusion in Stage 4 genutzt werden
@@ -80,7 +81,7 @@ tracking:
   min_hits_to_report: 3            # Mindestanzahl an Matches, damit ein Track ausgegeben wird
   temporal:
     max_distance: 5.0              # Maximale Distanz für Hungarian Match im Tracker
-    max_age: 3                     # Wie viele Frames ein Track ungematcht überlebt
+    max_age: 2                     # Wie viele Frames ein Track ungematcht überlebt
 
 render: # Für Visualisierungen in Stage 1, 2, 5
   line_thickness:    2
