@@ -8,7 +8,7 @@ import copy # Für deepcopy
 from PIL import Image 
 import argparse 
 
-from oft.data.dataset import TruckScenesDataset 
+from oft.data.old_dataset import TruckScenesDataset 
 from oft.utils.sensor_utils import (
     get_camera_intrinsic,
     get_sensor_extrinsic,

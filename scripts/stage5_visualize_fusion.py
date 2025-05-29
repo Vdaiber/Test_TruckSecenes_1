@@ -8,7 +8,7 @@ from pyquaternion import Quaternion
 import argparse 
 
 from oft.utils.config import load_config
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 from truckscenes import TruckScenes 
 from truckscenes.utils.data_classes import Box as DevBox 
 from oft.utils.sensor_utils import (

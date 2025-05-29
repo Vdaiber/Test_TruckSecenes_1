@@ -15,7 +15,7 @@ if SRC_ROOT not in sys.path:
     sys.path.insert(0, SRC_ROOT)
 
 from oft.utils.config          import load_config
-from oft.data.dataset          import TruckScenesDataset
+from oft.data.old_dataset          import TruckScenesDataset
 from oft.data.collate          import collate_fn
 from torch.utils.data          import DataLoader
 from oft.old_examples.visualize_fusion_comparison import main as visualize_fusion_comparison

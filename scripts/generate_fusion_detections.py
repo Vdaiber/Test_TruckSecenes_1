@@ -5,7 +5,7 @@ import json
 import os
 import numpy as np
 
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 from oft.fusion.nms_3d import nms_bev_3d
 
 def cast_py(val):

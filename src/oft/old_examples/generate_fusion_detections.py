@@ -35,7 +35,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     # 2) Dataset‐Instanzen
-    from oft.data.dataset import TruckScenesDataset
+    from oft.data.old_dataset import TruckScenesDataset
     common = dict(
         dataroot       = dcfg["dataroot"],
         version        = dcfg["version"].strip(),

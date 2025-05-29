@@ -24,7 +24,7 @@ def main():
     target_sample_idx = int(vcfg.get("sample_idx", 0))
     
     # Temporäres Dataset nur für den Token-Lookup
-    from oft.data.dataset import TruckScenesDataset 
+    from oft.data.old_dataset import TruckScenesDataset 
     # Initialisiere mit minimalen Parametern, da wir nur den Token brauchen
     temp_ds = TruckScenesDataset(
         dataroot=str(cfg["dataset"]["dataroot"]), 

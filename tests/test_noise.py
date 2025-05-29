@@ -1,4 +1,4 @@
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 from oft.utils.config     import load_config
 import numpy as np
 

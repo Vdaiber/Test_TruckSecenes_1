@@ -1,7 +1,7 @@
 # test_loader.py
 from torch.utils.data import DataLoader
 from oft.utils.config import load_config
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 from oft.data.collate import collate_fn
 
 cfg = load_config()

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from oft.utils.config import load_config
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 
 cfg = load_config()
 dcfg = cfg["dataset"]

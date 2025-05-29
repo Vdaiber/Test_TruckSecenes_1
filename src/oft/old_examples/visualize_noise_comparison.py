@@ -13,7 +13,7 @@ SRC_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
 if SRC_ROOT not in sys.path:
     sys.path.insert(0, SRC_ROOT)
 
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 from oft.utils.sensor_utils import (
     get_camera_intrinsic,
     get_sensor_extrinsic,

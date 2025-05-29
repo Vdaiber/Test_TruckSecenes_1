@@ -17,7 +17,7 @@ from truckscenes.utils.data_classes import Box
 from truckscenes.utils.geometry_utils import view_points
 
 from oft.utils.config import load_config
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 from oft.utils.sensor_utils import (
     get_camera_intrinsic,
     get_sensor_extrinsic,

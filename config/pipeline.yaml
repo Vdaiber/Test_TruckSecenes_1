@@ -63,9 +63,11 @@ simulation:
 # Konfiguration für Stage 4 (Fusion)
 fusion:
   enabled:           true          
-  iou_threshold:     0.1  
-  track_to_track_max_dist: 2.0         # NMS-Schwelle für NMS auf simulierten Daten
-  min_confidence_for_b2_input: 0.3 # NEU - Teste Werte wie 0.3, 0.4 oder 0.5
+  iou_threshold:     0.2  
+  track_to_track_max_dist: 5.0         # NMS-Schwelle für NMS auf simulierten Daten
+  min_confidence_for_b2_input: 0.85
+  use_velocity_in_track_dist: true  # NEU/Geändert
+  velocity_weight_in_track_dist: 0.3  # NEU - Teste Werte wie 0.3, 0.4 oder 0.5
   # score_threshold:   0.5         # Wird von nms_bev_3d aktuell nicht als Filter verwendet, nur zur Sortierung
   
   # Definiert, welche der simulierten Outputs für die Fusion in Stage 4 genutzt werden
@@ -80,7 +82,16 @@ tracking:
   use_noisy_gt_as_input: true      # Stage 3 nutzt GT-Daten, die mit dataset.augment_noise_std verrauscht wurden
   min_hits_to_report: 3            # Mindestanzahl an Matches, damit ein Track ausgegeben wird
   temporal:
-    max_distance: 5.0              # Maximale Distanz für Hungarian Match im Tracker
+    temporal:
+    # Alter Parameter, könnte jetzt match_max_combined_cost sein oder entfernt werden,
+    # je nachdem, ob du noch einen reinen Distanz-Fallback brauchst.
+    # max_distance: 5.0 # Veraltet, wenn max_combined_cost verwendet wird
+
+    # Neue Parameter für die kombinierte Kostenfunktion:
+    match_max_combined_cost: 0.7     # Schwellenwert für die kombinierten Kosten
+    cost_dist_weight: 0.7            # Gewicht für Distanzanteil (W_DIST)
+    cost_iou_weight: 0.3             # Gewicht für IOU-Anteil (W_IOU)
+    cost_dist_norm_factor: 15.0      # Normalisierungsfaktor für Distanzkosten
     max_age: 2                     # Wie viele Frames ein Track ungematcht überlebt
 
 render: # Für Visualisierungen in Stage 1, 2, 5

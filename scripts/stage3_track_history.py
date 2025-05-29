@@ -8,7 +8,7 @@ import numpy as np
 # from truckscenes.utils.geometry_utils import transform_matrix
 
 from oft.utils.config import load_config
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 from oft.utils.tracking_utils import MultiObjectTracker 
 from oft.utils.common_utils import _to_json_serializable
 

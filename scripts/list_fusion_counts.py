@@ -5,7 +5,7 @@ Aufruf im Projekt-Root: python scripts/list_fusion_counts.py
 """
 import json
 from oft.utils.config import load_config
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 
 def main():
     # 1) Config & Dataset

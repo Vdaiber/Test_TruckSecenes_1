@@ -1,7 +1,7 @@
 # test_loader_meta.py
 from torch.utils.data import DataLoader
 from oft.utils.config import load_config
-from oft.data.dataset import TruckScenesDataset
+from oft.data.old_dataset import TruckScenesDataset
 
 cfg = load_config()
 ds = TruckScenesDataset(
