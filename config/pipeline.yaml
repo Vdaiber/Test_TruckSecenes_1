@@ -98,5 +98,5 @@ render: # Für Visualisierungen in Stage 1, 2, 5
   line_thickness:    2
   color_mode:        category
   custom_colormap:   null
-  z_threshold:       0.1           # Für Frustum Culling in der Visualisierung
+  z_threshold:       0.5           # Für Frustum Culling in der Visualisierung
   box_visibility:    ANY
