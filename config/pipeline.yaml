@@ -46,18 +46,18 @@ simulation:
   sources: 
     sensor_gt_clean_dropout:
       output_file: "sim_gt_clean_dropout.json" 
-      noise_std_multiplier: 0.0 # Kein Rauschen für diese Quelle
-      dropout_rate: 0.6 # Starker Dropout
+      noise_std_multiplier: 0.1 # Kein Rauschen für diese Quelle
+      dropout_rate: 0 # Starker Dropout
       score: 0.95       
     sensor_gt_noisy_A:
       output_file: "sim_gt_noisy_A.json"
       noise_std_multiplier: 1.0 # Starkes Rauschen
-      dropout_rate: 0.2 
+      dropout_rate: 0 
       score: 0.65 
     sensor_gt_noisy_B_dropout:
       output_file: "sim_gt_noisy_B_dropout.json"
       noise_std_multiplier: 1.5 # Sehr starkes Rauschen
-      dropout_rate: 0.4 
+      dropout_rate: 0 
       score: 0.45 
 
 # Konfiguration für Stage 4 (Fusion)

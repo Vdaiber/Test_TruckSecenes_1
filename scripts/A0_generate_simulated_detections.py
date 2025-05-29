@@ -84,7 +84,7 @@ def main():
         dataroot=str(dcfg["dataroot"]),
         version=str(dcfg["version"]).strip(),
         history_window=0, 
-        max_boxes=int(dcfg.get("gt_max_boxes") or 0), 
+        max_boxes=None, # HIER GEÄNDERT: Lade alle Boxen für A0
         augment_noise_std=0.0 # Wichtig: Saubere GT als Basis laden
     )
 
