@@ -3,8 +3,8 @@
 
 # 1. Dataset-Konfiguration (für C1: ObjectFusionGTDataset)
 dataset:
-  dataroot: "./datasets" 
-  version: "v1.0-mini"
+  dataroot:         /data
+  version:          v1.0-mini
   history_window_transformer: 2 
   # Mapping von Kategorie-Index (aus category.json) zu Klassenname
   # Diese Reihenfolge MUSS mit der Output-Reihenfolge des Klassifikationskopfes des Modells übereinstimmen (ohne Hintergrundklasse)

@@ -9,7 +9,7 @@ import argparse
 from typing import Dict, Any, Optional, Tuple, List
 import numpy as np 
 import torch.nn.functional as F 
-import json # Hinzugefügt für das Speichern der Vorhersagen als JSON
+import json 
 
 # Korrekte relative Importe basierend auf der Projektstruktur
 from oft.utils.config import load_config
@@ -23,8 +23,8 @@ from oft.transformer.loss import HungarianMatcher, SetCriterion
 from truckscenes import TruckScenes 
 from truckscenes.eval.detection.config import config_factory 
 from truckscenes.eval.detection.data_classes import DetectionConfig 
-from truckscenes.eval.detection.evaluate import DetectionEval
-from truckscenes.eval.common.data_classes import EvalBoxes # Wird verwendet, um Boxen zu sammeln
+from truckscenes.eval.detection.evaluate import DetectionEval 
+from truckscenes.eval.common.data_classes import EvalBoxes
 from pyquaternion import Quaternion as PyQuaternion
 
 class ObjectFusionTransformerModel(nn.Module):
@@ -154,9 +154,9 @@ def evaluate_model(model: nn.Module,
                    dataloader: DataLoader, 
                    device: torch.device, 
                    cfg: Dict[str, Any],
-                   ts_instance: TruckScenes, # TruckScenes Instanz für GT-Laden durch DevKit
+                   # ts_instance: TruckScenes, # Entfernt, da für diese DetectionEval-API nicht direkt benötigt
                    criterion: Optional[nn.Module] = None): 
-    print("\n--- Starting Evaluation with TruckScenes DevKit (v1.0.0 API) ---")
+    print("\n--- Starting Evaluation with TruckScenes DevKit ---") 
     model.eval()
 
     eval_main_cfg = cfg.get("evaluation", {})
@@ -168,50 +168,45 @@ def evaluate_model(model: nn.Module,
         print("FEHLER: 'dataset.class_names' nicht in der Konfiguration gefunden oder ungültig. Evaluation nicht möglich.")
         return {"mAP": -1.0, "error": "class_names missing or invalid in config"}
 
-    # Erstelle DetectionConfig Objekt, lade Basis aus DevKit und überschreibe mit unserer YAML
     devkit_base_config_name = eval_params_from_yaml.get("devkit_base_config_name", "detection_cvpr_2024")
     try:
         detection_config_obj = config_factory(devkit_base_config_name)
         print(f"Basis-Evaluationskonfiguration '{devkit_base_config_name}' aus DevKit geladen.")
     except Exception as e:
         print(f"WARNUNG: Konnte DevKit-Basis-Eval-Config '{devkit_base_config_name}' nicht laden: {e}.")
-        detection_config_obj = DetectionConfig() # Erstelle leeres Objekt
+        detection_config_obj = DetectionConfig()
 
-    # Wichtig: Setze class_names aus unserer Config, da die JSONs aus dem DevKit sie nicht unbedingt enthalten
+    # Überschreibe/Setze Parameter aus unserer pipeline_c_modules.yaml
     detection_config_obj.class_names = class_names 
-    # Überschreibe weitere Parameter aus unserer YAML
     if "dist_fcn" in eval_params_from_yaml: detection_config_obj.dist_fcn = eval_params_from_yaml["dist_fcn"]
     if "dist_ths" in eval_params_from_yaml: detection_config_obj.dist_ths = np.array(eval_params_from_yaml["dist_ths"])
-    if "iou_ths_bev" in eval_params_from_yaml: detection_config_obj.iou_ths = np.array(eval_params_from_yaml["iou_ths_bev"]) # In DetectionConfig heißt es iou_ths
+    if "iou_ths_bev" in eval_params_from_yaml: detection_config_obj.iou_ths = np.array(eval_params_from_yaml["iou_ths_bev"])
     if "conf_th_eval" in eval_params_from_yaml: detection_config_obj.conf_th = eval_params_from_yaml["conf_th_eval"]
     if "min_recall" in eval_params_from_yaml: detection_config_obj.min_recall = eval_params_from_yaml["min_recall"]
     if "max_boxes_per_sample" in eval_params_from_yaml: detection_config_obj.max_boxes_per_sample = eval_params_from_yaml["max_boxes_per_sample"]
     if "min_points_per_box" in eval_params_from_yaml: detection_config_obj.min_points = eval_params_from_yaml["min_points_per_box"]
     if "step_size_recall_pr" in eval_params_from_yaml: detection_config_obj.step_size_recall_pr = eval_params_from_yaml["step_size_recall_pr"]
     
-    # Sammelbehälter für alle Vorhersagen im EvalBox-Format
-    # Die `DetectionEval` v1.0.0 erwartet eine JSON-Datei mit Vorhersagen.
-    # Wir erstellen diese JSON-Datei temporär.
-    predictions_for_json = {"meta": {"use_camera": True, "use_lidar": False, "use_radar": False, 
-                                     "use_map": False, "use_external": False, 
-                                     "use_future_frames": False, "use_tta": False,
-                                     "method_name": "ObjectFusionTransformer", 
-                                     "authors": "AI_Student", "affiliation": "TUM",
-                                     "description": "Predictions from C-Pipeline",
-                                     "code_url": "", "paper_url": ""}, 
-                            "results": {}}
-    
+    all_pred_eval_boxes = EvalBoxes() 
+    all_gt_eval_boxes = EvalBoxes() 
     num_model_classes = cfg.get("model", {}).get("num_classes", len(class_names))
+    
     num_batches = len(dataloader)
     if num_batches == 0:
         print("FEHLER: Eval Dataloader ist leer.")
         return {"mAP": -1.0, "error": "Eval dataloader empty"}
 
-    print("Sammle Modellvorhersagen für Evaluation...")
+    print("Sammle Modellvorhersagen und GT-Daten für Evaluation...")
     for batch_idx, batch_data in enumerate(dataloader):
         encoder_input_features = batch_data["encoder_input_features"].to(device, non_blocking=True)
         encoder_input_mask = batch_data["encoder_input_mask"].to(device, non_blocking=True)
         src_xyz_centers = encoder_input_features[:, :, :3].clone()
+        
+        if 'gt_detections_list_raw' not in batch_data:
+            print("FEHLER: 'gt_detections_list_raw' nicht im Batch gefunden. Bitte Collate-Funktion anpassen.")
+            return {"mAP": -1.0, "error": "gt_detections_list_raw missing"}
+            
+        raw_gt_detections_batch = batch_data['gt_detections_list_raw'] 
         batch_sample_tokens = batch_data["sample_tokens"]
         
         outputs_dict = model(
@@ -228,7 +223,7 @@ def evaluate_model(model: nn.Module,
             pred_logits_sample = pred_logits_batch[i] 
             pred_boxes_sample = pred_boxes_batch[i]   
 
-            sample_results_list = []
+            sample_pred_boxes_for_eval_list = []
             pred_scores_softmax = F.softmax(pred_logits_sample, dim=-1) 
             
             for q_idx in range(pred_scores_softmax.shape[0]): 
@@ -248,64 +243,88 @@ def evaluate_model(model: nn.Module,
                 yaw_rad = box_params_7d[6]
                 rotation_quat = PyQuaternion(axis=[0,0,1], angle=yaw_rad).elements.tolist()
                 
-                # Das Format für sample_result in der JSON-Datei (siehe detection.md im Devkit)
-                sample_result_dict = {
-                    "sample_token": sample_token, 
-                    "translation": translation, 
-                    "size": size,
-                    "rotation": rotation_quat, 
-                    "velocity": [np.nan, np.nan], # Devkit erwartet 2D-Velocity hier, oder NaNs
-                    "detection_name": class_name,
-                    "detection_score": score, 
-                    "attribute_name": "" # Attribute werden aktuell nicht vorhergesagt
+                pred_box_dict_for_eval = {
+                    "sample_token": sample_token, "translation": translation, "size": size,
+                    "rotation": rotation_quat, "velocity": [np.nan, np.nan], 
+                    "detection_name": class_name, "detection_score": score, 
+                    "attribute_name": "" 
                 }
-                sample_results_list.append(sample_result_dict)
+                sample_pred_boxes_for_eval_list.append(pred_box_dict_for_eval)
             
-            predictions_for_json["results"][sample_token] = sample_results_list
+            if sample_token not in all_pred_eval_boxes.boxes: all_pred_eval_boxes.boxes[sample_token] = []
+            all_pred_eval_boxes.boxes[sample_token].extend(sample_pred_boxes_for_eval_list)
+
+            # Konvertiere GT-Daten für dieses Sample
+            gt_dets_for_sample_raw_list = raw_gt_detections_batch[i] 
+            sample_gt_boxes_for_eval_list = []
+            for gt_det_dict in gt_dets_for_sample_raw_list:
+                class_idx_gt = gt_det_dict['class_label']
+                class_name_gt = class_names[class_idx_gt]
+                box_params_gt_7d = gt_det_dict['box_world'] 
+                translation_gt = box_params_gt_7d[0:3].tolist()
+                size_gt = box_params_gt_7d[3:6].tolist()
+                yaw_gt = box_params_gt_7d[6]
+                rotation_quat_gt = PyQuaternion(axis=[0,0,1], angle=yaw_gt).elements.tolist()
+                velocity_gt = gt_det_dict['velocity_world'].tolist()
+                gt_box_dict_for_eval = {
+                    "sample_token": sample_token, "translation": translation_gt, "size": size_gt,
+                    "rotation": rotation_quat_gt, "detection_name": class_name_gt,
+                    "detection_score": 1.0, 
+                    "velocity": velocity_gt,
+                }
+                sample_gt_boxes_for_eval_list.append(gt_box_dict_for_eval)
+
+            if sample_token not in all_gt_eval_boxes.boxes: all_gt_eval_boxes.boxes[sample_token] = []
+            all_gt_eval_boxes.boxes[sample_token].extend(sample_gt_boxes_for_eval_list)
             
         log_freq_eval_collect = max(1, num_batches // 5 if num_batches > 0 else 1)
         if (batch_idx + 1) % log_freq_eval_collect == 0 or batch_idx == num_batches - 1 : 
             print(f"Evaluation data collection: [{batch_idx+1}/{num_batches}] processed.")
-
-    # Speichere die gesammelten Vorhersagen in einer temporären JSON-Datei
+    
     eval_output_dir = os.path.join(cfg.get("training", {}).get("checkpoint_dir", "."), "eval_output_devkit")
     os.makedirs(eval_output_dir, exist_ok=True)
-    temp_pred_json_path = os.path.join(eval_output_dir, f"predictions_temp_{time.strftime('%Y%m%d-%H%M%S')}.json")
-    
-    try:
-        with open(temp_pred_json_path, 'w') as f:
-            json.dump(predictions_for_json, f, indent=2)
-        print(f"Temporäre Vorhersage-JSON gespeichert unter: {temp_pred_json_path}")
-    except Exception as e:
-        print(f"FEHLER beim Speichern der temporären Vorhersage-JSON: {e}")
-        return {"mAP": -1.0, "error": "Failed to save prediction JSON"}
 
-    # Führe die Evaluation mit der DetectionEval-Klasse des Devkits v1.0.0 durch
-    print(f"\nRunning TruckScenes DetectionEval (v1.0.0 API). Output directory for plots: {eval_output_dir}")
+    # Die JSON-Datei mit Vorhersagen wird nicht mehr für den Konstruktor benötigt,
+    # aber die DetectionEval-Klasse könnte sie für andere Zwecke intern erzeugen oder erwarten,
+    # wenn man die Ergebnisse auf dem Server einreichen wollte.
+    # Für die lokale Berechnung der Metriken übergeben wir die EvalBoxes-Objekte direkt.
+    # temp_pred_json_path = os.path.join(eval_output_dir, f"predictions_for_eval_{time.strftime('%Y%m%d-%H%M%S')}.json")
+    # try:
+    #     with open(temp_pred_json_path, 'w') as f:
+    #         # Die EvalBoxes-Klasse hat typischerweise eine .serialize()-Methode, um das richtige Format zu erzeugen
+    #         # Für das "submission" format:
+    #         submission_json = {"meta": {...}, "results": all_pred_eval_boxes.boxes}
+    #         json.dump(submission_json, f, indent=2)
+    #     print(f"Vorhersage-JSON für DevKit Eval gespeichert unter: {temp_pred_json_path}")
+    # except Exception as e:
+    #     print(f"FEHLER beim Speichern der Vorhersage-JSON für DevKit Eval: {e}")
+    #     # return {"mAP": -1.0, "error": "Failed to save prediction JSON for DevKit Eval"}
+    # # Wir fahren ohne die JSON fort, da wir die Objekte direkt übergeben.
+
+    print(f"\nRunning TruckScenes DetectionEval. Output directory for plots: {eval_output_dir}")
     
+    # KORRIGIERTER AUFRUF für DetectionEval, der gt_boxes und pred_boxes direkt übergibt
     detection_evaluator = DetectionEval(
-        nusc=ts_instance, # TruckScenes Instanz
-        config=detection_config_obj, 
-        result_path=temp_pred_json_path, # Pfad zur JSON mit unseren Vorhersagen
+        gt_boxes=all_gt_eval_boxes,      
+        pred_boxes=all_pred_eval_boxes,  
+        cfg=detection_config_obj, 
         eval_set=eval_main_cfg.get("eval_split_name", "mini_val"), 
         output_dir=eval_output_dir,
         verbose=True
+        # nusc=ts_instance, # Entfernt, da es den TypeError verursacht hat
+        # result_path=temp_pred_json_path # Entfernt, da pred_boxes direkt übergeben wird
     )
-    # Die v1.0.0 DetectionEval hat eine run() Methode, die die Evaluation durchführt
-    # und die Metriken in self.metrics und self.cfg.eval_results_path speichert.
-    # Die run() Methode gibt nichts direkt zurück.
-    detection_evaluator.run(render_curves=True) # render_curves=True um PR-Kurven zu erzeugen
+    detection_evaluator.run(render_curves=True) 
 
-    # Die Metriken sind in detection_evaluator.metrics.mean_dist_aps und .mean_ap gespeichert
-    print("\n--- Evaluation Results (TruckScenes DevKit v1.0.0 API) ---")
+    print("\n--- Evaluation Results (TruckScenes DevKit) ---")
     final_metrics_to_return = {"mAP": 0.0} 
 
-    if detection_evaluator.metrics:
+    if detection_evaluator.metrics: 
         mean_ap = detection_evaluator.metrics.mean_ap
         print(f"Mean AP (mAP) over distance thresholds: {mean_ap:.4f}")
         final_metrics_to_return["mAP"] = mean_ap
         
-        if detection_evaluator.metrics.mean_dist_aps:
+        if detection_evaluator.metrics.mean_dist_aps: 
             for class_name_eval in detection_config_obj.class_names: 
                 if class_name_eval in detection_evaluator.metrics.mean_dist_aps:
                     ref_dist_th_for_print = detection_config_obj.dist_ths[0] if detection_config_obj.dist_ths.size > 0 else -1.0
@@ -316,8 +335,6 @@ def evaluate_model(model: nn.Module,
         print("Evaluation metrics object in DetectionEval is None or empty.")
     
     print(f"Evaluation artifacts (like PR curves) should be in: {eval_output_dir}")
-    # Optional: Temporäre JSON-Datei löschen
-    # os.remove(temp_pred_json_path)
     print("--- Evaluation Finished ---")
     return final_metrics_to_return
 
@@ -380,8 +397,10 @@ def main_train_loop(cli_args: argparse.Namespace):
     print("\n--- Training Finished ---")
 
     print("\n--- Performing Final Evaluation ---")
-    # Erstelle eine TruckScenes-Instanz für die Evaluation
-    ts_instance_for_eval = TruckScenes(version=dataset_cfg["version"], dataroot=dataset_cfg["dataroot"], verbose=False)
+    # ts_instance wird für die korrigierte DetectionEval-Initialisierung nicht mehr direkt benötigt,
+    # aber es schadet nicht, sie hier zu erstellen, falls andere Teile sie benötigen.
+    # Für die main-branch API von DetectionEval ist es optional.
+    # ts_instance_for_eval = TruckScenes(version=dataset_cfg["version"], dataroot=dataset_cfg["dataroot"], verbose=False)
 
     best_model_path = os.path.join(checkpoint_dir, "model_best.pth.tar")
     if os.path.isfile(best_model_path):
@@ -398,7 +417,13 @@ def main_train_loop(cli_args: argparse.Namespace):
         eval_dataloader = DataLoader(eval_dataset, batch_size=train_cfg.get("batch_size", 2), shuffle=False, num_workers=train_cfg.get("num_workers", 0), collate_fn=object_fusion_gt_collate_fn)
         if len(eval_dataloader) == 0: print(f"FEHLER: Eval-Dataloader für Split '{eval_split}' leer."); return
     
-    metrics = evaluate_model(model, eval_dataloader, device, cfg, ts_instance=ts_instance_for_eval, criterion=criterion) 
+    # Übergebe die ts_instance hier, falls DetectionEval sie doch intern braucht.
+    # Für die main-branch API ist es optional, wenn gt_boxes und pred_boxes übergeben werden.
+    # Da wir jetzt wieder auf die API umstellen, die gt_boxes und pred_boxes direkt nimmt,
+    # ist ts_instance hier nicht mehr zwingend für den DetectionEval-Konstruktor.
+    metrics = evaluate_model(model, eval_dataloader, device, cfg, 
+                             # ts_instance=ts_instance_for_eval, # Entfernt für diesen Versuch
+                             criterion=criterion) 
     print("\nFinal Evaluation Metrics:", metrics)
 
 
