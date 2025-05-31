@@ -349,6 +349,9 @@ AMENT_IGNORE
 
 output/*
 output/
+checkpoints_oft_c_pipeline/
+checkpoints_oft_c_pipeline/*
+
 # Support for Project snippet scope
 
 # End of https://www.toptal.com/developers/gitignore/api/ros2,pycharm,python,visualstudiocode,c++
