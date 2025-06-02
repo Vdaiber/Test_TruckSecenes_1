@@ -1,32 +1,192 @@
-# src/oft/transformer/loss.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 from typing import List, Dict, Optional, Tuple
 import numpy as np
+import math # Für math.pi
 
 import os
-from oft.utils.config import load_config
+from oft.utils.config import load_config # Für den Test-Block
 from omegaconf import OmegaConf # Für die Konvertierung von DictConfig und Erstellung
 
-def placeholder_bev_iou_loss(boxes1_7d: torch.Tensor, boxes2_7d: torch.Tensor) -> torch.Tensor:
+# --- Hilfsfunktionen für BEV GIoU ---
+
+def get_bev_corners_pytorch(boxes_7d: torch.Tensor) -> torch.Tensor:
     """
-    Platzhalter für BEV IoU / GIoU Loss.
-    Aktuell implementiert als eine skalierte L1-Distanz der 2D-Zentren,
-    um einen Wert ungleich Null zu liefern, der aber nicht die echte IoU ist.
-    Sollte durch eine korrekte IoU/GIoU-Berechnung im BEV ersetzt werden.
-    Clamped den Wert auf maximal 2.0, um den DETR GIoU-Loss-Bereich (-1 bis 1 für IoU, 0 bis 2 für GIoU-Loss)
-    grob zu simulieren, wobei höhere Werte hier schlechter sind.
+    Berechnet die 4 BEV-Eckpunkte für einen Satz von 7D-Boxen.
+    Args:
+        boxes_7d: Tensor der Form (N, 7) mit [cx, cy, cz, width, length, height, yaw].
+                  width (dim 3) ist entlang der lokalen y-Achse der Box.
+                  length (dim 4) ist entlang der lokalen x-Achse der Box.
+    Returns:
+        Tensor der Form (N, 4, 2) mit den Eckpunkten (x,y) in der BEV-Ebene.
+        Reihenfolge der Ecken: vorne-links, vorne-rechts, hinten-rechts, hinten-links
+                               (relativ zur Box-Orientierung, x-Achse zeigt nach vorne)
     """
-    if boxes1_7d.numel() == 0 or boxes2_7d.numel() == 0:
-        return torch.tensor(0.0, device=boxes1_7d.device)
+    if boxes_7d.ndim == 1:
+        boxes_7d = boxes_7d.unsqueeze(0)
     
-    # Simuliere einen "Distanz"-basierten Loss, der größer ist, je weiter die Boxen entfernt sind.
-    # Dies ist KEIN IoU/GIoU, dient nur dazu, dass der Code läuft.
-    # Verwende nur cx, cy (Indizes 0, 1)
-    cost = torch.cdist(boxes1_7d[:, :2], boxes2_7d[:, :2], p=1) / 10.0 # Skalierungsfaktor, um Werte < 2 zu bekommen
-    return torch.clamp(cost, max=2.0) # GIoU Loss ist typischerweise [0, 2]
+    # cx, cy, cz, w, l, h, yaw
+    centers_x = boxes_7d[:, 0]
+    centers_y = boxes_7d[:, 1]
+    # cz wird für BEV ignoriert
+    widths = boxes_7d[:, 3]  # Entlang der lokalen y-Achse der Box
+    lengths = boxes_7d[:, 4] # Entlang der lokalen x-Achse der Box
+    # height wird für BEV ignoriert
+    yaws = boxes_7d[:, 6]
+
+    # Halbe Länge und Breite
+    half_lengths = lengths / 2.0
+    half_widths = widths / 2.0
+
+    # Eckpunkte im lokalen Koordinatensystem der Box (x zeigt nach vorne, y nach links)
+    # Reihenfolge: vorne-links, vorne-rechts, hinten-rechts, hinten-links
+    # (l/2, w/2), (l/2, -w/2), (-l/2, -w/2), (-l/2, w/2)
+    corners_local = torch.zeros((boxes_7d.shape[0], 4, 2), device=boxes_7d.device)
+    corners_local[:, 0, 0] = half_lengths
+    corners_local[:, 0, 1] = half_widths
+    corners_local[:, 1, 0] = half_lengths
+    corners_local[:, 1, 1] = -half_widths
+    corners_local[:, 2, 0] = -half_lengths
+    corners_local[:, 2, 1] = -half_widths
+    corners_local[:, 3, 0] = -half_lengths
+    corners_local[:, 3, 1] = half_widths
+
+    # Rotationsmatrix erstellen
+    cos_yaw = torch.cos(yaws)
+    sin_yaw = torch.sin(yaws)
+
+    # Rotiere die Eckpunkte
+    # x_rot = x_local * cos_yaw - y_local * sin_yaw
+    # y_rot = x_local * sin_yaw + y_local * cos_yaw
+    corners_rotated_x = corners_local[..., 0] * cos_yaw.unsqueeze(1) - corners_local[..., 1] * sin_yaw.unsqueeze(1)
+    corners_rotated_y = corners_local[..., 0] * sin_yaw.unsqueeze(1) + corners_local[..., 1] * cos_yaw.unsqueeze(1)
+    
+    corners_rotated = torch.stack((corners_rotated_x, corners_rotated_y), dim=-1)
+
+    # Translatiere zu den Weltkoordinaten-Zentren
+    corners_world = corners_rotated + torch.stack((centers_x, centers_y), dim=-1).unsqueeze(1)
+    
+    return corners_world # (N, 4, 2)
+
+def calculate_bev_iou_from_corners_pytorch(
+    corners1: torch.Tensor, # (N, 4, 2)
+    corners2: torch.Tensor, # (M, 4, 2)
+    areas1: torch.Tensor,   # (N,) wahre Flächen (width * length)
+    areas2: torch.Tensor    # (M,) wahre Flächen (width * length)
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Berechnet eine angenäherte BEV IoU basierend auf den Achsen-parallelen Bounding Boxes (AABB)
+    der rotierten Eckpunkte.
+    Args:
+        corners1: Eckpunkte der ersten Boxen (N, 4, 2).
+        corners2: Eckpunkte der zweiten Boxen (M, 4, 2).
+        areas1: Tatsächliche Flächen der ersten Boxen (N,).
+        areas2: Tatsächliche Flächen der zweiten Boxen (M,).
+    Returns:
+        Tuple: (iou_matrix (N, M), intersection_area_matrix (N, M))
+    """
+    N = corners1.shape[0]
+    M = corners2.shape[0]
+    iou_matrix = torch.zeros((N, M), device=corners1.device)
+    intersection_area_matrix = torch.zeros((N, M), device=corners1.device)
+
+    # AABBs für jede Box aus ihren Ecken berechnen
+    min_xy1, _ = torch.min(corners1, dim=1) # (N, 2)
+    max_xy1, _ = torch.max(corners1, dim=1) # (N, 2)
+    
+    min_xy2, _ = torch.min(corners2, dim=1) # (M, 2)
+    max_xy2, _ = torch.max(corners2, dim=1) # (M, 2)
+
+    for i in range(N):
+        for j in range(M):
+            # Schnittfläche der AABBs der Ecken
+            inter_min_x = torch.max(min_xy1[i, 0], min_xy2[j, 0])
+            inter_min_y = torch.max(min_xy1[i, 1], min_xy2[j, 1])
+            inter_max_x = torch.min(max_xy1[i, 0], max_xy2[j, 0])
+            inter_max_y = torch.min(max_xy1[i, 1], max_xy2[j, 1])
+
+            inter_width = torch.clamp(inter_max_x - inter_min_x, min=0.0)
+            inter_height = torch.clamp(inter_max_y - inter_min_y, min=0.0)
+            intersection_aabb_corners = inter_width * inter_height
+            intersection_area_matrix[i, j] = intersection_aabb_corners
+
+            # Union basierend auf wahren Boxflächen und AABB-Schnittfläche der Ecken
+            union_area = areas1[i] + areas2[j] - intersection_aabb_corners
+            if union_area > 1e-6: # Numerische Stabilität
+                iou_matrix[i, j] = intersection_aabb_corners / union_area
+            else:
+                iou_matrix[i, j] = torch.tensor(0.0, device=corners1.device)
+    
+    return torch.clamp(iou_matrix, min=0.0, max=1.0), intersection_area_matrix
+
+
+def calculate_enclosing_box_area_bev_pytorch(
+    corners1: torch.Tensor, # (N, 4, 2)
+    corners2: torch.Tensor  # (M, 4, 2)
+) -> torch.Tensor:
+    """
+    Berechnet die Fläche der kleinsten achsenparallelen Bounding Box (AABB),
+    die jeweils ein Paar von Boxen (repräsentiert durch ihre Eckpunkte) umschließt.
+    Args:
+        corners1: Eckpunkte der ersten Boxen (N, 4, 2).
+        corners2: Eckpunkte der zweiten Boxen (M, 4, 2).
+    Returns:
+        Tensor der Form (N, M) mit den Flächen der umschließenden AABBs.
+    """
+    N = corners1.shape[0]
+    M = corners2.shape[0]
+    enclosing_area_matrix = torch.zeros((N, M), device=corners1.device)
+
+    for i in range(N):
+        for j in range(M):
+            # Kombiniere die Eckpunkte beider Boxen
+            all_corners = torch.cat((corners1[i], corners2[j]), dim=0) # (8, 2)
+            
+            min_coords, _ = torch.min(all_corners, dim=0) # (2,) -> [x_min, y_min]
+            max_coords, _ = torch.max(all_corners, dim=0) # (2,) -> [x_max, y_max]
+            
+            enclosing_width = max_coords[0] - min_coords[0]
+            enclosing_height = max_coords[1] - min_coords[1]
+            enclosing_area_matrix[i, j] = enclosing_width * enclosing_height
+            
+    return enclosing_area_matrix
+
+def generalized_bev_iou_pytorch(boxes1_7d: torch.Tensor, boxes2_7d: torch.Tensor) -> torch.Tensor:
+    """
+    Berechnet den Generalisierten BEV IoU (GIoU) zwischen zwei Sätzen von 7D-Boxen.
+    Verwendet eine angenäherte IoU basierend auf AABBs der rotierten Ecken.
+    Args:
+        boxes1_7d: Tensor der Form (N, 7) [cx, cy, cz, w, l, h, yaw].
+        boxes2_7d: Tensor der Form (M, 7) [cx, cy, cz, w, l, h, yaw].
+    Returns:
+        Tensor der Form (N, M) mit den paarweisen GIoU-Werten.
+    """
+    eps = 1e-7 # Für numerische Stabilität
+
+    # Wahre Flächen der Boxen (width * length)
+    areas1 = boxes1_7d[:, 3] * boxes1_7d[:, 4] # (N,)
+    areas2 = boxes2_7d[:, 3] * boxes2_7d[:, 4] # (M,)
+
+    # Eckpunkte im BEV
+    corners1 = get_bev_corners_pytorch(boxes1_7d) # (N, 4, 2)
+    corners2 = get_bev_corners_pytorch(boxes2_7d) # (M, 4, 2)
+
+    # Angenäherte IoU und Schnittfläche
+    iou_approx, intersection_area_approx = calculate_bev_iou_from_corners_pytorch(corners1, corners2, areas1, areas2) # (N,M), (N,M)
+
+    # Fläche der umschließenden Box (Area_C)
+    enclosing_area = calculate_enclosing_box_area_bev_pytorch(corners1, corners2) # (N,M)
+
+    # Union Area
+    union_area = areas1.unsqueeze(1) + areas2.unsqueeze(0) - intersection_area_approx # (N,M)
+    union_area = torch.clamp(union_area, min=eps) # Verhindere Division durch Null
+
+    # GIoU berechnen
+    giou = iou_approx - (enclosing_area - union_area) / (enclosing_area + eps)
+    
+    return torch.clamp(giou, min=-1.0, max=1.0) # GIoU ist im Bereich [-1, 1]
 
 
 class HungarianMatcher(nn.Module):
@@ -35,9 +195,9 @@ class HungarianMatcher(nn.Module):
     Basierend auf dem DETR-Matcher.
     """
     def __init__(self,
-                 cost_class: float = 1.0,      # Gewicht für Klassifikationskosten
-                 cost_bbox_l1: float = 1.0,    # Gewicht für L1-Distanz der Boxen
-                 cost_giou_bev: float = 1.0):  # Gewicht für GIoU-Kosten (aktuell Placeholder)
+                 cost_class: float = 1.0,
+                 cost_bbox_l1: float = 1.0,
+                 cost_giou_bev: float = 1.0):
         super().__init__()
         self.cost_class = cost_class
         self.cost_bbox_l1 = cost_bbox_l1
@@ -45,208 +205,120 @@ class HungarianMatcher(nn.Module):
         if cost_class == 0 and cost_bbox_l1 == 0 and cost_giou_bev == 0:
             raise ValueError("Alle Kosten-Gewichte im Matcher dürfen nicht null sein.")
 
-    @torch.no_grad() # Wichtig: Matching erfordert keine Gradienten
+    @torch.no_grad()
     def forward(self,
                 pred_logits: torch.Tensor,  # (Batch, NumQueries, NumClasses + 1)
-                pred_boxes: torch.Tensor,   # (Batch, NumQueries, BoxDim)
+                pred_boxes: torch.Tensor,   # (Batch, NumQueries, BoxDim=7)
                 gt_labels_b: torch.Tensor,    # (Batch, MaxNumGTObjects) - gepadded mit -1
-                gt_boxes_b: torch.Tensor      # (Batch, MaxNumGTObjects, BoxDim) - gepadded
+                gt_boxes_b: torch.Tensor      # (Batch, MaxNumGTObjects, BoxDim=7) - gepadded
                ) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        """
-        Führt das Matching für einen Batch durch.
-        Args:
-            pred_logits: Klassifikations-Logits der Vorhersagen.
-            pred_boxes: Vorhergesagte Boxen (7D: cx,cy,cz,w,l,h,yaw).
-            gt_labels_b: Ground-Truth Labels pro Sample, gepadded mit -1.
-            gt_boxes_b: Ground-Truth Boxen pro Sample, gepadded.
-        Returns:
-            Eine Liste von Tupeln (pred_indices, gt_indices) für jedes Sample im Batch.
-            Diese Indizes beziehen sich auf die *ungepaddeten* GTs.
-        """
         batch_size, num_queries = pred_logits.shape[:2]
-        indices = [] # Liste, um die (pred_idx, gt_idx) Paare pro Batch-Element zu speichern
+        indices = []
 
-        # Iteriere über jedes Sample im Batch
         for i in range(batch_size):
-            # Filtere gepaddete GT-Elemente heraus für dieses Sample
-            valid_gt_mask_i = (gt_labels_b[i] >= 0) # True für valide GTs
-            
-            # Wenn keine validen GTs für dieses Sample vorhanden sind, gibt es keine Matches
-            if not valid_gt_mask_i.any(): 
+            valid_gt_mask_i = (gt_labels_b[i] >= 0)
+            if not valid_gt_mask_i.any():
                 indices.append((torch.tensor([], dtype=torch.long, device=pred_logits.device),
                                 torch.tensor([], dtype=torch.long, device=pred_logits.device)))
                 continue
 
-            current_gt_labels_i = gt_labels_b[i][valid_gt_mask_i] # Nur valide GT-Labels
-            current_gt_boxes_i = gt_boxes_b[i][valid_gt_mask_i]   # Nur valide GT-Boxen
+            current_gt_labels_i = gt_labels_b[i][valid_gt_mask_i]
+            current_gt_boxes_i = gt_boxes_b[i][valid_gt_mask_i]
             num_gt_i = current_gt_labels_i.shape[0]
 
-            # Wenn nach dem Filtern keine GTs übrig bleiben (sollte durch .any() oben abgedeckt sein)
-            if num_gt_i == 0: 
+            if num_gt_i == 0:
                 indices.append((torch.tensor([], dtype=torch.long, device=pred_logits.device),
                                 torch.tensor([], dtype=torch.long, device=pred_logits.device)))
                 continue
 
-            # Vorhersagen für das aktuelle Sample
-            current_pred_logits_i = pred_logits[i] # (NumQueries, NumClasses + 1)
-            current_pred_boxes_i = pred_boxes[i]   # (NumQueries, BoxDim)
+            current_pred_logits_i = pred_logits[i]
+            current_pred_boxes_i = pred_boxes[i]
 
-            # --- Kostenberechnung ---
-            # Klassifikationskosten: -P(gt_class | pred)
-            # Nutze die Logits direkt oder die Wahrscheinlichkeiten nach Softmax. DETR verwendet oft Logits.
-            # Hier verwenden wir Wahrscheinlichkeiten für die Kostenmatrix.
-            prob = current_pred_logits_i.softmax(-1) # (NumQueries, NumClasses + 1)
-            # Kosten sind -Wahrscheinlichkeit der korrekten Klasse. Indiziere mit den GT-Labels.
-            cost_class_matrix = -prob[:, current_gt_labels_i] # (NumQueries, NumGT_i)
+            prob = current_pred_logits_i.softmax(-1)
+            cost_class_matrix = -prob[:, current_gt_labels_i]
 
-            # L1-Kosten für Bounding Boxes
-            cost_bbox_l1_matrix = torch.cdist(current_pred_boxes_i, current_gt_boxes_i, p=1) # (NumQueries, NumGT_i)
+            cost_bbox_l1_matrix = torch.cdist(current_pred_boxes_i, current_gt_boxes_i, p=1)
             
-            # GIoU-Kosten (aktuell Placeholder)
-            # Wichtig: placeholder_bev_iou_loss erwartet (N, 7) und (M, 7) und gibt (N, M) zurück
-            cost_giou_matrix = placeholder_bev_iou_loss(current_pred_boxes_i, current_gt_boxes_i) # (NumQueries, NumGT_i)
+            # Verwende den neuen GIoU-Loss für die Kostenberechnung
+            # GIoU-Werte sind im Bereich [-1, 1]. Kosten sollten positiv sein und kleiner für bessere Übereinstimmung.
+            # Daher verwenden wir 1 - GIoU als Kosten (Bereich [0, 2]).
+            giou_values = generalized_bev_iou_pytorch(current_pred_boxes_i, current_gt_boxes_i) # (NumQueries, NumGT_i)
+            cost_giou_matrix = 1.0 - giou_values # Kleinere Kosten für höhere GIoU
 
-            # Gesamtkostenmatrix
             C = (self.cost_class * cost_class_matrix +
                  self.cost_bbox_l1 * cost_bbox_l1_matrix +
                  self.cost_giou_bev * cost_giou_matrix)
             
-            # Konvertiere zu NumPy für linear_sum_assignment
             C_np = C.detach().cpu().numpy()
-            
-            # Führe das Matching durch
-            row_ind, col_ind = linear_sum_assignment(C_np) # row_ind sind Prädiktions-Indizes, col_ind sind GT-Indizes
-            
-            # Speichere die gematchten Indizes als Tensoren
+            row_ind, col_ind = linear_sum_assignment(C_np)
             indices.append((torch.as_tensor(row_ind, dtype=torch.long, device=pred_logits.device),
                             torch.as_tensor(col_ind, dtype=torch.long, device=pred_logits.device)))
         return indices
 
 
 class SetCriterion(nn.Module):
-    """
-    Verlustfunktion für Transformer-basierte Objektdetektion.
-    Berechnet einen Satz von Verlusten (Klassifikation, BBox L1, GIoU)
-    basierend auf den Zuordnungen des HungarianMatchers.
-    """
     def __init__(self, 
                  num_classes: int, 
                  matcher: HungarianMatcher,
-                 eos_coef: float, # Gewicht für die "no object" Klasse
-                 losses: List[str], # Liste der zu berechnenden Verluste, z.B. ['labels', 'boxes_l1', 'giou_bev']
-                 weight_dict: Dict[str, float] # Gewichtung für jeden berechneten Verlust
+                 eos_coef: float,
+                 losses: List[str],
+                 weight_dict: Dict[str, float]
                 ): 
         super().__init__()
         self.num_classes = num_classes
         self.matcher = matcher
         self.eos_coef = eos_coef 
-        self.losses = losses # Speichere die Liste der zu berechnenden Verluste
-        self.weight_dict = weight_dict # Speichere das Dictionary mit den Gewichten
+        self.losses = losses
+        self.weight_dict = weight_dict
 
-        # Erstelle Gewichte für CrossEntropyLoss (eos_coef für "no object" Klasse)
         empty_weight = torch.ones(self.num_classes + 1)
-        empty_weight[-1] = self.eos_coef # Letzte Klasse ist "no object"
+        empty_weight[-1] = self.eos_coef
         self.register_buffer('empty_weight', empty_weight)
 
     def _get_src_permutation_idx(self, indices: List[Tuple[torch.Tensor, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
-        """ Erstellt Batch- und Quellen-Indizes für die gematchten Vorhersagen. """
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
         src_idx = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
 
     def _get_tgt_permutation_idx(self, indices: List[Tuple[torch.Tensor, torch.Tensor]]) -> Tuple[torch.Tensor, torch.Tensor]:
-        """ Erstellt Batch- und Ziel-Indizes für die gematchten Ground-Truth-Objekte. """
         batch_idx = torch.cat([torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
     def loss_labels(self, 
-                    pred_logits: torch.Tensor, # (Batch, NumQueries, NumClasses + 1)
-                    gt_labels_b: torch.Tensor,   # (Batch, MaxNumGTObjects), gepadded mit -1
-                    indices: List[Tuple[torch.Tensor, torch.Tensor]], # Output des Matchers
-                    num_total_boxes: int # Gesamtzahl der gematchten Boxen über den Batch
+                    pred_logits: torch.Tensor,
+                    gt_labels_b: torch.Tensor,
+                    indices: List[Tuple[torch.Tensor, torch.Tensor]],
+                    num_total_boxes: int
                    ) -> Dict[str, torch.Tensor]:
-        """Klassifikationsverlust (Cross Entropy)."""
-        # Erstelle Ziel-Klassenlabels für alle Vorhersagen (Queries)
-        # Initialisiere alle mit "no object" Klasse (self.num_classes)
         target_classes = torch.full(pred_logits.shape[:2], self.num_classes,
                                     dtype=torch.long, device=pred_logits.device)
         
-        # Hole die Batch- und Prädiktions-Indizes der gematchten Paare
         batch_indices_for_preds, matched_pred_indices_batch = self._get_src_permutation_idx(indices)
         
-        # Erstelle eine Liste der GT-Labels für die gematchten Vorhersagen
         target_classes_o_list = [] 
-        for i, (_, gt_idx_sample) in enumerate(indices): # (_, gt_idx_sample) sind die Indizes der gematchten GTs für Sample i
-            valid_gt_labels_sample_i = gt_labels_b[i][gt_labels_b[i] >= 0] # Nur valide GT-Labels für dieses Sample
+        for i, (_, gt_idx_sample) in enumerate(indices):
+            valid_gt_labels_sample_i = gt_labels_b[i][gt_labels_b[i] >= 0]
             if gt_idx_sample.numel() > 0 and valid_gt_labels_sample_i.numel() > 0:
-                 # Stelle sicher, dass gt_idx_sample innerhalb der Grenzen von valid_gt_labels_sample_i liegt
                  if gt_idx_sample.max() < len(valid_gt_labels_sample_i):
                     target_classes_o_list.append(valid_gt_labels_sample_i[gt_idx_sample])
-                # else:
-                    # Dieser Fall sollte durch das Matching und die GT-Vorbereitung nicht oft auftreten,
-                    # aber eine Warnung könnte hier nützlich sein.
-                    # print(f"WARNUNG loss_labels: gt_idx_sample.max() ({gt_idx_sample.max()}) >= len(valid_gt_labels) ({len(valid_gt_labels_sample_i)})")
 
-        
-        if target_classes_o_list: # Nur wenn es Matches gab
+        if target_classes_o_list:
             target_classes_o = torch.cat(target_classes_o_list)
-            # Weise den gematchten Vorhersagen die korrekten GT-Klassen zu
-            if target_classes_o.numel() == batch_indices_for_preds.numel(): # Sicherheitscheck
+            if target_classes_o.numel() == batch_indices_for_preds.numel():
                 target_classes[batch_indices_for_preds, matched_pred_indices_batch] = target_classes_o
-            # else:
-                # print(f"WARNUNG loss_labels: Anzahl gematchter GT-Labels ({target_classes_o.numel()}) != Anzahl gematchter Prädiktionen ({batch_indices_for_preds.numel()})")
 
-
-        # Berechne Cross-Entropy-Verlust
-        # pred_logits: (Batch, NumQueries, NumClasses + 1) -> Transponieren für CrossEntropy
         loss_ce = F.cross_entropy(pred_logits.transpose(1, 2), target_classes, self.empty_weight)
         losses = {'loss_ce': loss_ce}
         return losses
 
     def loss_boxes_l1(self, 
-                      pred_boxes: torch.Tensor, # (Batch, NumQueries, BoxDim)
-                      gt_boxes_b: torch.Tensor,   # (Batch, MaxNumGTObjects, BoxDim), gepadded
-                      gt_labels_b: torch.Tensor,  # (Batch, MaxNumGTObjects), gepadded mit -1 (für Filterung)
+                      pred_boxes: torch.Tensor,
+                      gt_boxes_b: torch.Tensor,
+                      gt_labels_b: torch.Tensor,
                       indices: List[Tuple[torch.Tensor, torch.Tensor]],
-                      num_total_boxes: int # Gesamtzahl gematchter Boxen
+                      num_total_boxes: int
                      ) -> Dict[str, torch.Tensor]:
-        """L1-Verlust für Bounding Boxes."""
-        batch_indices_for_preds, matched_pred_indices_batch = self._get_src_permutation_idx(indices)
-        src_boxes = pred_boxes[batch_indices_for_preds, matched_pred_indices_batch] # Nur die gematchten Vorhersagen
-
-        # Sammle die entsprechenden GT-Boxen
-        target_boxes_list = []
-        for i, (_, gt_idx_sample) in enumerate(indices): # gt_idx_sample bezieht sich auf die validen GTs
-            valid_gt_mask_sample_i = (gt_labels_b[i] >= 0)
-            valid_gt_boxes_sample_i = gt_boxes_b[i][valid_gt_mask_sample_i] # Nur valide GT-Boxen für dieses Sample
-            if gt_idx_sample.numel() > 0 and valid_gt_boxes_sample_i.numel() > 0:
-                if gt_idx_sample.max() < valid_gt_boxes_sample_i.shape[0]: # Sicherheitscheck
-                    target_boxes_list.append(valid_gt_boxes_sample_i[gt_idx_sample])
-        
-        if not target_boxes_list : # Keine Matches im gesamten Batch
-            return {'loss_bbox_l1': torch.tensor(0.0, device=pred_boxes.device)}
-
-        target_boxes = torch.cat(target_boxes_list, dim=0) 
-
-        # Sicherheitscheck, ob die Anzahl der gematchten Prädiktionen und GTs übereinstimmt
-        if src_boxes.shape[0] != target_boxes.shape[0]: 
-            # print(f"WARNUNG loss_boxes_l1: src_boxes.shape[0] ({src_boxes.shape[0]}) != target_boxes.shape[0] ({target_boxes.shape[0]})")
-            return {'loss_bbox_l1': torch.tensor(0.0, device=pred_boxes.device)} # Oder Fehler werfen
-
-        loss_bbox_l1 = F.l1_loss(src_boxes, target_boxes, reduction='none')
-        losses = {}
-        losses['loss_bbox_l1'] = loss_bbox_l1.sum() / num_total_boxes # Normiere durch Anzahl gematchter Boxen
-        return losses
-
-    def loss_boxes_giou(self, 
-                        pred_boxes: torch.Tensor, # (Batch, NumQueries, BoxDim)
-                        gt_boxes_b: torch.Tensor,   # (Batch, MaxNumGTObjects, BoxDim), gepadded
-                        gt_labels_b: torch.Tensor,  # (Batch, MaxNumGTObjects), gepadded mit -1 (für Filterung)
-                        indices: List[Tuple[torch.Tensor, torch.Tensor]],
-                        num_total_boxes: int # Gesamtzahl gematchter Boxen
-                       ) -> Dict[str, torch.Tensor]:
-        """GIoU-Verlust für Bounding Boxes (aktuell mit Placeholder)."""
         batch_indices_for_preds, matched_pred_indices_batch = self._get_src_permutation_idx(indices)
         src_boxes = pred_boxes[batch_indices_for_preds, matched_pred_indices_batch]
 
@@ -256,73 +328,90 @@ class SetCriterion(nn.Module):
             valid_gt_boxes_sample_i = gt_boxes_b[i][valid_gt_mask_sample_i]
             if gt_idx_sample.numel() > 0 and valid_gt_boxes_sample_i.numel() > 0:
                 if gt_idx_sample.max() < valid_gt_boxes_sample_i.shape[0]:
+                    target_boxes_list.append(valid_gt_boxes_sample_i[gt_idx_sample])
+        
+        if not target_boxes_list :
+            return {'loss_bbox_l1': torch.tensor(0.0, device=pred_boxes.device)}
+
+        target_boxes = torch.cat(target_boxes_list, dim=0) 
+
+        if src_boxes.shape[0] != target_boxes.shape[0]:
+            return {'loss_bbox_l1': torch.tensor(0.0, device=pred_boxes.device)}
+
+        loss_bbox_l1 = F.l1_loss(src_boxes, target_boxes, reduction='none')
+        losses = {}
+        losses['loss_bbox_l1'] = loss_bbox_l1.sum() / num_total_boxes
+        return losses
+
+    def loss_boxes_giou(self, 
+                        pred_boxes: torch.Tensor,
+                        gt_boxes_b: torch.Tensor,
+                        gt_labels_b: torch.Tensor,
+                        indices: List[Tuple[torch.Tensor, torch.Tensor]],
+                        num_total_boxes: int
+                       ) -> Dict[str, torch.Tensor]:
+        batch_indices_for_preds, matched_pred_indices_batch = self._get_src_permutation_idx(indices)
+        src_boxes = pred_boxes[batch_indices_for_preds, matched_pred_indices_batch] # (NumMatched, 7)
+
+        target_boxes_list = []
+        for i, (_, gt_idx_sample) in enumerate(indices):
+            valid_gt_mask_sample_i = (gt_labels_b[i] >= 0)
+            valid_gt_boxes_sample_i = gt_boxes_b[i][valid_gt_mask_sample_i]
+            if gt_idx_sample.numel() > 0 and valid_gt_boxes_sample_i.numel() > 0:
+                if gt_idx_sample.max() < valid_gt_boxes_sample_i.shape[0]:
                      target_boxes_list.append(valid_gt_boxes_sample_i[gt_idx_sample])
         
-        if not target_boxes_list:
+        if not target_boxes_list or src_boxes.numel() == 0: # Prüfe auch src_boxes
             return {'loss_giou': torch.tensor(0.0, device=pred_boxes.device)}
             
-        target_boxes = torch.cat(target_boxes_list, dim=0)
+        target_boxes = torch.cat(target_boxes_list, dim=0) # (NumMatched, 7)
         
         if src_boxes.shape[0] != target_boxes.shape[0]:
-            # print(f"WARNUNG loss_boxes_giou: src_boxes.shape[0] ({src_boxes.shape[0]}) != target_boxes.shape[0] ({target_boxes.shape[0]})")
             return {'loss_giou': torch.tensor(0.0, device=pred_boxes.device)}
 
-        # Verwende den Placeholder für GIoU-Loss paarweise
-        giou_costs_per_pair = []
-        if src_boxes.numel() > 0 and target_boxes.numel() > 0: # Stelle sicher, dass Tensoren nicht leer sind
-            for k_pair in range(src_boxes.shape[0]): # Iteriere über jedes gematchte Paar
-                # placeholder_bev_iou_loss erwartet (N, 7) und (M, 7)
-                cost_val = placeholder_bev_iou_loss(src_boxes[k_pair].unsqueeze(0), 
-                                                    target_boxes[k_pair].unsqueeze(0))
-                giou_costs_per_pair.append(cost_val.squeeze()) # Squeeze, um Skalar zu erhalten
+        # Berechne paarweise GIoU-Werte für die gematchten Paare
+        # generalized_bev_iou_pytorch erwartet (N,7) und (M,7) und gibt (N,M) zurück.
+        # Hier haben wir bereits die 1-zu-1 gematchten Paare.
+        giou_values_per_pair = []
+        for k_pair in range(src_boxes.shape[0]):
+            # Unsqueeze, um (1,7) zu erhalten, da die Funktion Batch-Verarbeitung erwartet
+            giou_val = generalized_bev_iou_pytorch(src_boxes[k_pair].unsqueeze(0), 
+                                                   target_boxes[k_pair].unsqueeze(0))
+            giou_values_per_pair.append(giou_val.squeeze()) # Squeeze, um Skalar zu erhalten
         
         losses = {}
-        if giou_costs_per_pair:
-            loss_giou_sum = torch.stack(giou_costs_per_pair).sum()
-            losses['loss_giou'] = loss_giou_sum / num_total_boxes # Normiere
+        if giou_values_per_pair:
+            giou_values_tensor = torch.stack(giou_values_per_pair) # (NumMatched)
+            loss_giou = (1.0 - giou_values_tensor).sum() / num_total_boxes # GIoU-Loss ist 1 - GIoU
+            losses['loss_giou'] = loss_giou
         else:
             losses['loss_giou'] = torch.tensor(0.0, device=pred_boxes.device)
         return losses
 
     def forward(self, 
                 decoder_outputs: Dict[str, torch.Tensor], 
-                gt_labels_b: torch.Tensor,   # (Batch, MaxNumGTObjects), gepadded mit -1
-                gt_boxes_b: torch.Tensor      # (Batch, MaxNumGTObjects, BoxDim), gepadded
+                gt_labels_b: torch.Tensor,
+                gt_boxes_b: torch.Tensor
                ) -> Dict[str, torch.Tensor]:
-        """
-        Berechnet die Verluste.
-        Args:
-            decoder_outputs: Dictionary mit 'pred_logits' und 'pred_boxes'.
-            gt_labels_b: Ground-Truth Labels pro Sample, gepadded mit -1.
-            gt_boxes_b: Ground-Truth Boxen pro Sample, gepadded.
-        Returns:
-            Ein Dictionary mit den berechneten Verlusten (ungewichtet).
-        """
         pred_logits = decoder_outputs['pred_logits']
         pred_boxes = decoder_outputs['pred_boxes']
 
-        # Führe das Matching durch, um Vorhersagen den GTs zuzuordnen
         indices = self.matcher(pred_logits, pred_boxes, gt_labels_b, gt_boxes_b)
 
-        # Berechne die Gesamtzahl der gematchten Boxen über den Batch (für die Normierung der Verluste)
         num_total_matched_boxes = sum(len(t[0]) for t in indices)
         num_total_matched_boxes = torch.as_tensor([num_total_matched_boxes], dtype=torch.float, device=pred_logits.device)
-        # Verhindere Division durch Null, wenn keine Boxen gematcht wurden
         num_total_matched_boxes = torch.clamp(num_total_matched_boxes, min=1).item()
 
-
         losses = {}
-        for loss_type in self.losses: # self.losses kommt aus der Konfiguration (z.B. ['labels', 'boxes_l1', 'giou_bev'])
+        for loss_type in self.losses:
             if loss_type == 'labels':
                 losses.update(self.loss_labels(pred_logits, gt_labels_b, indices, num_total_matched_boxes))
             elif loss_type == 'boxes_l1':
                 losses.update(self.loss_boxes_l1(pred_boxes, gt_boxes_b, gt_labels_b, indices, num_total_matched_boxes))
-            elif loss_type == 'giou_bev': # KORRIGIERT: Behandle 'giou_bev'
+            elif loss_type == 'giou_bev': # Name aus der Config 'losses_to_compute'
+                # Intern wird der Schlüssel 'loss_giou' verwendet, was mit 'loss_weight_dict' übereinstimmt.
                 losses.update(self.loss_boxes_giou(pred_boxes, gt_boxes_b, gt_labels_b, indices, num_total_matched_boxes))
-            # elif loss_type == 'boxes_giou': # Falls der Key in der Config 'boxes_giou' wäre
-            #     losses.update(self.loss_boxes_giou(pred_boxes, gt_boxes_b, gt_labels_b, indices, num_total_matched_boxes))
             else:
-                # Dieser Fall sollte jetzt nicht mehr eintreten, wenn 'giou_bev' korrekt behandelt wird.
                 raise ValueError(f"Unbekannter Verlusttyp in self.losses: {loss_type}")
         return losses
 
@@ -336,66 +425,85 @@ if __name__ == '__main__':
             config_file_path = alt_config_path
         else:
             print(f"ERROR: Config file not found at {config_file_path} or {alt_config_path}")
-            exit()
-            
-    try:
-        cfg_dict = load_config(config_file_path)
-        full_pipeline_config = OmegaConf.create(cfg_dict) 
-        print(f"Konfiguration für Loss-Test geladen von: {os.path.abspath(config_file_path)}")
-        
-        model_cfg = full_pipeline_config.get('model', OmegaConf.create({})) 
-        loss_cfg = full_pipeline_config.get('loss', OmegaConf.create({}))
-        
-        num_classes_cfg = model_cfg.get('num_classes', 28) 
-        num_queries_cfg = model_cfg.get('num_queries', 100)
-        box_dim_cfg = model_cfg.get('box_dim', 7)
-        cost_class_cfg = loss_cfg.get('cost_class_weight', 1.0)
-        cost_bbox_l1_cfg = loss_cfg.get('cost_bbox_l1_weight', 5.0)
-        cost_giou_bev_cfg = loss_cfg.get('cost_giou_bev_weight', 2.0)
-        eos_coef_cfg = loss_cfg.get('eos_coefficient', 0.1)
-        losses_to_compute_cfg = list(OmegaConf.to_container(loss_cfg.get('losses_to_compute', ['labels', 'boxes_l1', 'giou_bev']), resolve=True))
-        loss_weight_dict_cfg = dict(OmegaConf.to_container(loss_cfg.get('loss_weight_dict', {'loss_ce': 1.0, 'loss_bbox_l1': 5.0, 'loss_giou': 2.0}), resolve=True)) # Füge loss_giou hinzu
-
-    except Exception as e:
-        print(f"Fehler beim Laden der Konfiguration für Loss-Test: {e}")
-        print("Verwende Standard-Fallback-Parameter.")
-        num_classes_cfg = 5 
-        num_queries_cfg = 10
-        box_dim_cfg = 7
-        cost_class_cfg = 1.0
-        cost_bbox_l1_cfg = 1.0
-        cost_giou_bev_cfg = 1.0
-        eos_coef_cfg = 0.1
-        losses_to_compute_cfg = ['labels', 'boxes_l1', 'giou_bev'] # Füge giou_bev hinzu
-        loss_weight_dict_cfg = {'loss_ce': 1.0, 'loss_bbox_l1': 1.0, 'loss_giou': 1.0} # Füge loss_giou hinzu
+            # Fallback-Konfiguration, wenn keine Datei gefunden wird
+            cfg_dict = {
+                "model": {"num_classes": 5, "num_queries": 10, "box_dim": 7},
+                "loss": {
+                    "cost_class_weight": 1.0, "cost_bbox_l1_weight": 1.0, "cost_giou_bev_weight": 1.0,
+                    "eos_coefficient": 0.1, "losses_to_compute": ["labels", "boxes_l1", "giou_bev"],
+                    "loss_weight_dict": {"loss_ce": 1.0, "loss_bbox_l1": 1.0, "loss_giou": 1.0}
+                }
+            }
+            full_pipeline_config = OmegaConf.create(cfg_dict)
+            print("Using fallback configuration for loss test.")
+            # exit() # Nicht beenden, sondern mit Fallback fortfahren
+    
+    if os.path.exists(config_file_path): # Nur laden, wenn Pfad existiert
+        try:
+            cfg_dict = load_config(config_file_path)
+            full_pipeline_config = OmegaConf.create(cfg_dict) 
+            print(f"Konfiguration für Loss-Test geladen von: {os.path.abspath(config_file_path)}")
+        except Exception as e:
+            print(f"Fehler beim Laden der Konfiguration für Loss-Test: {e}")
+            cfg_dict = {
+                "model": {"num_classes": 5, "num_queries": 10, "box_dim": 7},
+                "loss": {
+                    "cost_class_weight": 1.0, "cost_bbox_l1_weight": 1.0, "cost_giou_bev_weight": 1.0,
+                    "eos_coefficient": 0.1, "losses_to_compute": ["labels", "boxes_l1", "giou_bev"],
+                    "loss_weight_dict": {"loss_ce": 1.0, "loss_bbox_l1": 1.0, "loss_giou": 1.0}
+                }
+            }
+            full_pipeline_config = OmegaConf.create(cfg_dict)
+            print(f"Verwende Standard-Fallback-Parameter aufgrund eines Ladefehlers: {cfg_dict}")
+    
+    model_cfg = full_pipeline_config.get('model', OmegaConf.create({})) 
+    loss_cfg = full_pipeline_config.get('loss', OmegaConf.create({}))
+    
+    num_classes_cfg = model_cfg.get('num_classes', 5) 
+    num_queries_cfg = model_cfg.get('num_queries', 10)
+    box_dim_cfg = model_cfg.get('box_dim', 7)
+    cost_class_cfg = loss_cfg.get('cost_class_weight', 1.0)
+    cost_bbox_l1_cfg = loss_cfg.get('cost_bbox_l1_weight', 1.0)
+    cost_giou_bev_cfg = loss_cfg.get('cost_giou_bev_weight', 1.0)
+    eos_coef_cfg = loss_cfg.get('eos_coefficient', 0.1)
+    losses_to_compute_cfg = list(OmegaConf.to_container(loss_cfg.get('losses_to_compute', ['labels', 'boxes_l1', 'giou_bev']), resolve=True))
+    loss_weight_dict_cfg = dict(OmegaConf.to_container(loss_cfg.get('loss_weight_dict', {'loss_ce': 1.0, 'loss_bbox_l1': 1.0, 'loss_giou': 1.0}), resolve=True))
 
     batch_size = 2
-    dummy_pred_logits = torch.rand(batch_size, num_queries_cfg, num_classes_cfg + 1) 
-    dummy_pred_boxes = torch.rand(batch_size, num_queries_cfg, box_dim_cfg) * 50 
+    device = torch.device("cpu") # Test auf CPU
+    dummy_pred_logits = torch.rand(batch_size, num_queries_cfg, num_classes_cfg + 1, device=device) 
+    # Box-Parameter: cx, cy, cz, w, l, h, yaw
+    # cx, cy im Bereich [-50, 50], cz ~0, w,l,h ~[1,5], yaw [-pi, pi]
+    dummy_pred_boxes = torch.rand(batch_size, num_queries_cfg, box_dim_cfg, device=device)
+    dummy_pred_boxes[:, :, 0:2] = (dummy_pred_boxes[:, :, 0:2] * 100) - 50 # cx, cy
+    dummy_pred_boxes[:, :, 2] = dummy_pred_boxes[:, :, 2] * 2 - 1       # cz
+    dummy_pred_boxes[:, :, 3:6] = (dummy_pred_boxes[:, :, 3:6] * 4) + 1 # w,l,h
+    dummy_pred_boxes[:, :, 6] = (dummy_pred_boxes[:, :, 6] * 2 * math.pi) - math.pi # yaw
+
     max_gt_objs_in_batch_for_test = 4 
-    dummy_gt_labels_b = torch.full((batch_size, max_gt_objs_in_batch_for_test), -1, dtype=torch.long) 
-    dummy_gt_boxes_b = torch.zeros((batch_size, max_gt_objs_in_batch_for_test, box_dim_cfg), dtype=torch.float32)
-    dummy_gt_valid_mask_b = torch.zeros((batch_size, max_gt_objs_in_batch_for_test), dtype=torch.bool)
+    dummy_gt_labels_b = torch.full((batch_size, max_gt_objs_in_batch_for_test), -1, dtype=torch.long, device=device) 
+    dummy_gt_boxes_b = torch.zeros((batch_size, max_gt_objs_in_batch_for_test, box_dim_cfg), dtype=torch.float32, device=device)
 
     if max_gt_objs_in_batch_for_test >= 3:
-        dummy_gt_labels_b[0, :3] = torch.randint(0, num_classes_cfg, (3,))
-        dummy_gt_boxes_b[0, :3, :] = torch.rand(3, box_dim_cfg) * 50
-        dummy_gt_valid_mask_b[0, :3] = True
+        dummy_gt_labels_b[0, :3] = torch.randint(0, num_classes_cfg, (3,), device=device)
+        gt_boxes_sample0 = torch.rand(3, box_dim_cfg, device=device)
+        gt_boxes_sample0[:, 0:2] = (gt_boxes_sample0[:, 0:2] * 80) - 40
+        gt_boxes_sample0[:, 3:6] = (gt_boxes_sample0[:, 3:6] * 3) + 1
+        gt_boxes_sample0[:, 6] = (gt_boxes_sample0[:, 6] * 2 * math.pi) - math.pi
+        dummy_gt_boxes_b[0, :3, :] = gt_boxes_sample0
+        
     if max_gt_objs_in_batch_for_test >= 2:
-        dummy_gt_labels_b[1, :2] = torch.randint(0, num_classes_cfg, (2,))
-        dummy_gt_boxes_b[1, :2, :] = torch.rand(2, box_dim_cfg) * 50
-        dummy_gt_valid_mask_b[1, :2] = True
+        dummy_gt_labels_b[1, :2] = torch.randint(0, num_classes_cfg, (2,), device=device)
+        gt_boxes_sample1 = torch.rand(2, box_dim_cfg, device=device)
+        gt_boxes_sample1[:, 0:2] = (gt_boxes_sample1[:, 0:2] * 70) - 35
+        gt_boxes_sample1[:, 3:6] = (gt_boxes_sample1[:, 3:6] * 4) + 0.5
+        gt_boxes_sample1[:, 6] = (gt_boxes_sample1[:, 6] * 2 * math.pi) - math.pi
+        dummy_gt_boxes_b[1, :2, :] = gt_boxes_sample1
     
     print(f"\nVerwendete Loss-Parameter (aus Config oder Fallback):")
     print(f"  num_classes (ohne BG): {num_classes_cfg}, num_queries: {num_queries_cfg}, box_dim: {box_dim_cfg}")
     print(f"  Matcher Kosten: class={cost_class_cfg}, bbox_l1={cost_bbox_l1_cfg}, giou_bev={cost_giou_bev_cfg}")
     print(f"  Criterion: eos_coef={eos_coef_cfg}, losses={losses_to_compute_cfg}, weights={loss_weight_dict_cfg}")
-    print(f"\nDummy Inputs für Loss-Berechnung:")
-    print(f"  Pred Logits shape: {dummy_pred_logits.shape}")
-    print(f"  Pred Boxes shape: {dummy_pred_boxes.shape}")
-    print(f"  GT Labels (padded mit -1) shape: {dummy_gt_labels_b.shape}, Beispiel Sample 0: {dummy_gt_labels_b[0].tolist()}")
-    print(f"  GT Boxes (gepadded) shape: {dummy_gt_boxes_b.shape}")
-    print(f"  GT Valid Mask shape (Info): {dummy_gt_valid_mask_b.shape}, Beispiel Sample 0: {dummy_gt_valid_mask_b[0].tolist()}")
 
     matcher_instance = HungarianMatcher(
         cost_class=cost_class_cfg, 
@@ -408,18 +516,12 @@ if __name__ == '__main__':
         eos_coef=eos_coef_cfg,
         losses=losses_to_compute_cfg,
         weight_dict=loss_weight_dict_cfg
-    )
+    ).to(device)
     
     print("\nTeste HungarianMatcher separat:")
     matched_indices = matcher_instance(dummy_pred_logits, dummy_pred_boxes, dummy_gt_labels_b, dummy_gt_boxes_b)
     for i_sample, (pred_idx, gt_idx) in enumerate(matched_indices):
         print(f"  Sample {i_sample}: Matched Pred Indices: {pred_idx.tolist()}, Matched GT Indices (relativ zu validen GTs): {gt_idx.tolist()}")
-        num_valid_gt_sample_i = (dummy_gt_labels_b[i_sample] >=0).sum().item()
-        if gt_idx.numel() > 0 and num_valid_gt_sample_i > 0:
-            if not (gt_idx.max().item() < num_valid_gt_sample_i) :
-                 print(f"    WARNUNG: GT Index {gt_idx.max().item()} könnte außerhalb der Grenzen für {num_valid_gt_sample_i} valide GTs in Sample {i_sample} liegen.")
-        elif gt_idx.numel() > 0 and num_valid_gt_sample_i == 0:
-            print(f"    WARNUNG: Matches gefunden ({gt_idx.tolist()}), aber keine validen GTs in Sample {i_sample} laut Label-Padding.")
 
     print("\nTeste SetCriterion.forward():")
     calculated_losses = criterion(
@@ -432,7 +534,7 @@ if __name__ == '__main__':
     for loss_name, loss_value in calculated_losses.items():
         print(f"  {loss_name}: {loss_value.item():.4f}")
     
-    total_weighted_loss = torch.tensor(0.0)
+    total_weighted_loss = torch.tensor(0.0, device=device)
     if calculated_losses: 
         for k_loss in calculated_losses.keys():
             if k_loss in loss_weight_dict_cfg: 
