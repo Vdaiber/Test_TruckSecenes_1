@@ -21,3 +21,5 @@ scipy>=1.7.0
 
 # YAML config loader
 pyyaml>=6.0
+hydra-core
+omegaconf

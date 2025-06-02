@@ -1,0 +1,2 @@
+- training.epochs=1
+- training.print_freq=1

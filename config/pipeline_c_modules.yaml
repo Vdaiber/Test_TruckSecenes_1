@@ -5,7 +5,7 @@
 dataset:
   dataroot:         /data
   version:          v1.0-mini
-  history_window_transformer: 2 
+  history_window_transformer: 2
   # Mapping von Kategorie-Index (aus category.json) zu Klassenname
   # Diese Reihenfolge MUSS mit der Output-Reihenfolge des Klassifikationskopfes des Modells übereinstimmen (ohne Hintergrundklasse)
   # Überprüfe die category.json deines TruckScenes-Datensatzes für die korrekten Namen und Indizes.
@@ -42,78 +42,87 @@ dataset:
 
 # 2. Modell-Konfiguration (für C2: ObjectEncoder & C3: ObjectFusionTransformerDecoder)
 model:
-  d_model: 300                    
-  nhead: 6                        
-  dropout: 0.1                    
-  activation: "relu"              
-  num_input_features: 10          
-  num_encoder_layers: 3           
-  dim_feedforward_encoder: 1024   
-  pe_max_coord_val: 150.0         
-  num_decoder_layers: 3           
-  dim_feedforward_decoder: 1024   
-  num_queries: 100                
+  d_model: 300
+  nhead: 6
+  dropout: 0.1
+  activation: "relu"
+  num_input_features: 10
+  num_encoder_layers: 3
+  dim_feedforward_encoder: 1024
+  pe_max_coord_val: 150.0
+  num_decoder_layers: 3
+  dim_feedforward_decoder: 1024
+  num_queries: 100
   num_classes: 28  # Sollte len(dataset.class_names) entsprechen
-  box_dim: 7                      
+  box_dim: 7
 
 # 3. Verlustfunktion (C4: SetCriterion & HungarianMatcher)
 loss:
-  cost_class_weight: 2.0          
-  cost_bbox_l1_weight: 5.0        
-  cost_giou_bev_weight: 2.0       
-  eos_coefficient: 0.1            
-  losses_to_compute: ["labels", "boxes_l1"]
-  loss_weight_dict: {"loss_ce": 1.0, "loss_bbox_l1": 5.0}
+  cost_class_weight: 2.0
+  cost_bbox_l1_weight: 5.0
+  cost_giou_bev_weight: 2.0
+  eos_coefficient: 0.1
+  losses_to_compute:
+    - labels
+    - boxes_l1
+    - giou_bev
+  loss_weight_dict:
+    loss_ce: 1.0
+    loss_bbox_l1: 5.0
+    loss_giou: 2.0
 
 # 4. Trainingseinstellungen (für C5: Trainingsloop)
 training:
-  epochs: 50                      
-  batch_size: 4                   
-  learning_rate: 0.0001           
-  weight_decay: 0.0001            
-  lr_drop_epoch: 40               
-  lr_scheduler_gamma: 0.1         
-  clip_max_norm: 0.1              
-  num_workers: 2                  
-  device: "cpu" # mps für apple silicon, "cuda" für NVIDIA GPUs, "cpu" für CPU     Mps wird im Docker nicht unterstützt            
-  use_dataparallel: false         
-  checkpoint_dir: "./checkpoints_oft_c_pipeline" 
-  resume_checkpoint: null         
-  resume_if_checkpoint_exists: true 
-  save_every_k_epochs: 5          
-  print_freq: 10                  
-  print_freq_val: 5               
-  train_split_name: "mini_train"  
-  val_split_name: "mini_val"      
+  epochs: 1 # Beibehalten von deinem Testbefehl
+  batch_size: 4
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  lr_drop_epoch: 40
+  lr_scheduler_gamma: 0.1
+  clip_max_norm: 0.1
+  num_workers: 2
+  device: "cpu"
+  use_dataparallel: false
+  checkpoint_dir: "./checkpoints_oft_c_pipeline"
+  resume_checkpoint: null
+  resume_if_checkpoint_exists: true
+  save_every_k_epochs: 5
+  print_freq: 1 # Beibehalten von deinem Testbefehl
+  print_freq_val: 5
+  train_split_name: "mini_train"
+  val_split_name: "mini_val"
 
 # 5. Visualisierungs- und Rendering-Standardeinstellungen
 visualization:
-  camera_channel: "CAMERA_LEFT_FRONT" 
-render: 
+  camera_channel: "CAMERA_LEFT_FRONT"
+render:
   line_thickness: 2
-  color_mode: "category" 
-  custom_colormap: null  
-  z_threshold: 0.5       
-  box_visibility: "ANY"  
+  color_mode: "category"
+  custom_colormap: null
+  z_threshold: 0.5
+  box_visibility: "ANY"
 
 # 6. Evaluationseinstellungen (für C5: evaluate_model mit TruckScenes DevKit)
 evaluation:
-  eval_split_name: "mini_val" # Welcher Split für die finale Evaluation verwendet wird
+  eval_split_name: "mini_val"
+  # Meta-Informationen für das DevKit (optional, aber gut für Vollständigkeit)
+  devkit_meta:
+    use_camera: true  # Beispiel: Wenn deine Methode Kameradaten verwendet
+    use_lidar: true   # Beispiel: Wenn deine Methode LiDAR-Daten verwendet
+    use_radar: false
+    use_map: false
+    use_external: false
   # Parameter für truckscenes.eval.detection.config.DetectionCfg
-  # Diese werden verwendet, um das DetectionCfg Objekt für DetectionEval zu erstellen
   eval_detection_cfg:
     class_range: null # Wird automatisch aus dataset.class_names abgeleitet
-    dist_fcn: "center" # 'center' für 3D-Zentrumsdistanz, 'iou_bev' für BEV IoU
-    dist_ths: [0.5, 1.0, 2.0, 4.0] # Distanzschwellen für TP-Matching (in Metern für 'center')
-    iou_ths_bev: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] # IoU Schwellen wenn dist_fcn='iou_bev'
-                                                              # oder für AP Berechnung (oft Standard [0.5:0.05:0.95])
-    conf_th_eval: 0.1 # Konfidenz-Schwellenwert zum Filtern von Vorhersagen vor der Evaluation
+    dist_fcn: "center_distance" # KORRIGIERT: von "center" zu "center_distance"
+    dist_ths: [0.5, 1.0, 2.0, 4.0]
+    iou_ths_bev: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    conf_th_eval: 0.1
     min_recall: 0.0
-    max_boxes_per_sample: 100 # Max. Anzahl Vorhersagen pro Sample nach dem Filtern
-    min_points_per_box: 0 # Mindestanzahl Punkte in einer GT-Box, um sie zu berücksichtigen (0 = alle)
+    max_boxes_per_sample: 100
+    min_points_per_box: 0
     step_size_recall_pr: 101
-
-    # Spezifische Parameter für TruckScenes (aus deren eval config)
-    class_names_map_nuscenes_detailed: false # Auf False setzen für TruckScenes-Kategorien
+    class_names_map_nuscenes_detailed: false
     dist_fcn_callable: null # Wird intern gesetzt
     reset_global_cfg: true
