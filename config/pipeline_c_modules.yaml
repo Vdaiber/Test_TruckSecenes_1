@@ -1,5 +1,4 @@
 # Konfigurationsdatei für die Transformer-basierte C-Modul-Pipeline
-# (Kombiniert relevante Teile der alten pipeline.yaml mit neuen Einstellungen)
 
 # 1. Dataset-Konfiguration (für C1: ObjectFusionGTDataset)
 dataset:
@@ -51,7 +50,7 @@ model:
   num_input_features: 10          # Dimensionalität des Feature-Vektors für jedes Eingabeobjekt an den Encoder.
   num_encoder_layers: 3           # Anzahl der übereinander gestapelten Transformer-Encoder-Layer.
   dim_feedforward_encoder: 1024   # Dimension der Hidden-Layer in den FFNs des Encoders. Oft 4 * d_model.
-  pe_max_coord_val: 150.0         # Maximal erwarteter Koordinatenwert (in Metern) für die Skalierung der Positions-Encodings.
+  pe_max_coord_val: 1000000.0     # KORRIGIERT: Maximal erwarteter Koordinatenwert (in Metern) für die Skalierung der Positions-Encodings. Angepasst an große Weltkoordinaten.
   
   # Decoder-spezifische Parameter
   num_decoder_layers: 3           # Anzahl der übereinander gestapelten Transformer-Decoder-Layer.
@@ -59,7 +58,7 @@ model:
   num_queries: 100                # Anzahl der lernbaren Objekt-Queries im Decoder. Bestimmt die maximale Anzahl von Objekten, die das Modell vorhersagen kann.
   
   # Vorhersagekopf-Parameter
-  num_classes: 28                 # Anzahl der zu unterscheidenden Objektklassen. Muss len(dataset.class_names) entsprechen. Die "kein Objekt"-Klasse wird im Modell meist separat behandelt (+1 im Output-Layer).
+  num_classes: 28                 # Anzahl der zu unterscheidenden Objektklassen. Muss len(dataset.class_names) entsprechen.
   box_dim: 7                      # Dimensionalität der vorhergesagten Bounding-Box-Parameter (z.B. 7 für cx, cy, cz, w, l, h, yaw).
 
 # 3. Verlustfunktion (C4: SetCriterion & HungarianMatcher)
@@ -85,7 +84,7 @@ loss:
 
 # 4. Trainingseinstellungen (für C5: Trainingsloop)
 training:
-  epochs: 1                       # Gesamtzahl der Trainingsepochen. (Von dir für den Test auf 1 gesetzt).
+  epochs: 1                       # Für schnelles Debugging auf 1 gesetzt.
   batch_size: 4                   # Anzahl der Samples pro Batch und pro GPU (falls DataParallel verwendet wird).
   learning_rate: 0.0001           # Initiale Lernrate für den Optimizer.
   weight_decay: 0.0001            # Gewichtungsfaktor für die L2-Regularisierung (Weight Decay) im Optimizer.
@@ -99,7 +98,7 @@ training:
   resume_checkpoint: null         # Pfad zu einem spezifischen Checkpoint (.pth.tar), von dem das Training fortgesetzt werden soll. `null` startet von vorne.
   resume_if_checkpoint_exists: true # Wenn true, wird versucht, vom neuesten Checkpoint im `checkpoint_dir` (oft `*_latest.pth.tar`) fortzusetzen.
   save_every_k_epochs: 5          # Frequenz (in Epochen) für das Speichern von Checkpoints, zusätzlich zum neuesten und besten.
-  print_freq: 1                   # Frequenz (in Batches/Iterationen) für das Ausgeben von Trainingsstatistiken in der Konsole. (Von dir für den Test auf 1 gesetzt).
+  print_freq: 1                   # Für schnelles Debugging auf 1 gesetzt, um jeden Batch zu sehen.
   print_freq_val: 5               # Frequenz (in Batches/Iterationen) für das Ausgeben von Validierungsstatistiken.
   train_split_name: "mini_train"  # Name des Splits aus dem Datensatz, der für das Training verwendet wird.
   val_split_name: "mini_val"      # Name des Splits aus dem Datensatz, der für die Validierung verwendet wird.
@@ -133,7 +132,7 @@ evaluation:
   eval_detection_cfg:
     class_range: null             # Maximale Detektionsdistanz pro Klasse (in Metern). `null` bedeutet oft, dass Standardwerte des DevKits verwendet werden.
     dist_fcn: "center_distance"   # Distanzfunktion für das Matching von Vorhersagen zu Ground Truth. Optionen sind typischerweise "center_distance" (3D) oder "iou_bev" (2D BEV IoU).
-    dist_ths: [0.5, 1.0, 2.0, 4.0] # Liste von Distanzschwellenwerten (in Metern für 'center_distance', oder IoU-Werte für 'iou_bev') für das True-Positive-Matching.
+    dist_ths: [0.5, 1.0, 2.0, 4.0]# Liste von Distanzschwellenwerten (in Metern für 'center_distance', oder IoU-Werte für 'iou_bev') für das True-Positive-Matching.
     iou_ths_bev: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] # BEV IoU-Schwellenwerte, oft für die Berechnung von Average Precision (AP) verwendet (z.B. COCO-Style [0.5:0.05:0.95]).
     conf_th_eval: 0.1             # Konfidenz-Schwellenwert, um Vorhersagen vor der Evaluation zu filtern. Nur Boxen mit Score > conf_th_eval werden berücksichtigt.
     min_recall: 0.0               # Minimaler Recall-Wert für die Berechnung der Precision-Recall-Kurve.
@@ -144,4 +143,8 @@ evaluation:
     # Spezifische Parameter für das TruckScenes DevKit (oft von nuScenes Evaluation abgeleitet)
     class_names_map_nuscenes_detailed: false # Sollte für TruckScenes-Standardkategorien auf `false` stehen. True würde eine alternative (detailliertere) Klassenliste erwarten.
     dist_fcn_callable: null       # Wird intern vom DevKit basierend auf `dist_fcn` gesetzt. Nicht manuell konfigurieren.
-    reset_global_cfg: true 
+    reset_global_cfg: true        # Ob die globale Konfiguration des DevKits vor der Evaluation zurückgesetzt werden soll.
+    # Parameter, die im Code als Default verwendet werden, falls nicht in YAML:
+    # dist_th_tp: 2.0 (abgeleitet von dist_ths[2])
+    # min_precision: 0.1
+    # mean_ap_weight: 5
