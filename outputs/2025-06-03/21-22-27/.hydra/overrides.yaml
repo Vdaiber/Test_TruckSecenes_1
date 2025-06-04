@@ -1,0 +1,7 @@
+- training.epochs=2
+- training.print_freq=10
+- training.batch_size=2
+- dataset.dataroot=/data
+- dataset.version=v1.0-mini
+- model.pe_max_coord_val=1000000.0
+- training.num_workers=0

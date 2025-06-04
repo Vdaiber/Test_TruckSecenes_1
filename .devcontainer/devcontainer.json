@@ -1,0 +1,36 @@
+{
+  "name": "oft_truckscenes",
+  "build": {
+    "dockerfile": "../Dockerfile"
+  },
+  "workspaceFolder": "/app",
+  "remoteUser": "root",
+  "settings": {
+    "python.pythonPath": "/usr/local/bin/python3",
+    "python.defaultInterpreterPath": "/usr/local/bin/python3",
+    "python.formatting.provider": "black",
+    "editor.formatOnSave": true
+  },
+  "extensions": [
+    "ms-python.python",
+    "ms-toolsai.jupyter",
+    "ms-toolsai.jupyter-keymap",
+    "ms-toolsai.jupyter-renderers",
+    "ms-python.vscode-pylance",
+    "ms-azuretools.vscode-docker",
+    "esbenp.prettier-vscode",
+    "sbsnippets.pytorch-snippets",
+    "gaurishankergupta.opencv-snippets",
+    "GitHub.vscode-pull-request-github",
+    "donjayamanne.git-history"
+  ],
+  "mounts": [
+    "source=/Users/v_daiber/Desktop/Masterarbeit/objectfusiontransformer,target=/app,type=bind",
+    "source=/Users/v_daiber/Desktop/Masterarbeit/Datasets/man-truckscenes/samples,target=/data/samples,type=bind",
+    "source=/Users/v_daiber/Desktop/Masterarbeit/Datasets/man-truckscenes/sweeps,target=/data/sweeps,type=bind",
+    "source=/Users/v_daiber/Desktop/Masterarbeit/objectfusiontransformer/datasets/v1.0-mini,target=/data/v1.0-mini,type=bind",
+    "source=/Users/v_daiber/Desktop/Masterarbeit/objectfusiontransformer/output,target=/output,type=bind"
+  ],
+  "postCreateCommand": "pip install --upgrade pip && pip install -r requirements.txt || true",
+  
+}

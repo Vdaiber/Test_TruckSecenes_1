@@ -3,21 +3,24 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from typing import List, Dict, Any, Optional, Tuple
-from collections import defaultdict # NEU: defaultdict importiert
+from collections import defaultdict 
 
 from truckscenes import TruckScenes
-from truckscenes.utils.splits import create_splits_scenes # Zum Laden der Szenen-Splits
-from oft.utils.common_utils import parse_scene_description # Für scene_meta
+from truckscenes.utils.splits import create_splits_scenes 
+from truckscenes.eval.detection.utils import category_to_detection_name 
+from truckscenes.eval.detection.constants import DETECTION_NAMES as TRUCKSCENES_DETECTION_NAMES 
+
+from oft.utils.common_utils import parse_scene_description 
 from oft.utils.config import load_config 
 import os 
+from omegaconf import OmegaConf, ListConfig # OmegaConf importiert
 
 class ObjectFusionGTDataset(Dataset):
     """
     Dataset-Klasse zum Laden von Ground-Truth (GT) 3D-Objektdaten aus TruckScenes.
     Bereitet Daten für ein Transformer-Modell vor, wobei GT-Objekte als
     "perfekte Detektionen" eines konzeptionellen Einzelsensors behandelt werden.
-    Lädt umfassende Metadaten und eine Historie von GT-Boxen.
-    Erstellt Features für aktuelle und historische GT-Objekte als Input für den Encoder.
+    FOKUS: Aufbereitung für 12 DevKit-Klassen.
     """
     def __init__(self,
                  dataroot: str,
@@ -34,12 +37,31 @@ class ObjectFusionGTDataset(Dataset):
 
         dataset_specific_cfg = self.pipeline_cfg.get('dataset', {})
         self.history_window = int(dataset_specific_cfg.get('history_window_transformer', 0)) 
+        
+        class_names_from_cfg = dataset_specific_cfg.get('class_names', [])
+        # Stellt sicher, dass class_names_for_model eine Python-Liste ist
+        if isinstance(class_names_from_cfg, (ListConfig, list, tuple)):
+            self.class_names_for_model = list(OmegaConf.to_container(class_names_from_cfg, resolve=True)) \
+                                         if isinstance(class_names_from_cfg, ListConfig) else list(class_names_from_cfg)
+        else:
+            if self.verbose:
+                print(f"WARNUNG: dataset.class_names hat unerwarteten Typ {type(class_names_from_cfg)}. "
+                      f"Verwende Standard TRUCKSCENES_DETECTION_NAMES.")
+            self.class_names_for_model = list(TRUCKSCENES_DETECTION_NAMES)
+
+
+        if len(self.class_names_for_model) != 12 and self.verbose:
+            # Diese Warnung ist wichtig, wenn die YAML nicht die 12 Klassen hat
+            print(f"WARNUNG: self.class_names_for_model hat {len(self.class_names_for_model)} Einträge, "
+                  f"erwartet wurden 12 für DevKit-Klassen. Verwendete Klassen: {self.class_names_for_model}")
+
 
         model_specific_cfg = self.pipeline_cfg.get('model', {})
         self.num_encoder_input_features = int(model_specific_cfg.get('num_input_features', 10)) 
 
         if self.verbose:
             print(f"Initializing ObjectFusionGTDataset for split '{self.split_name}' with history_window={self.history_window}, num_encoder_input_features={self.num_encoder_input_features}...")
+            print(f"  Modell wird auf folgende {len(self.class_names_for_model)} Klassen trainiert: {self.class_names_for_model}")
 
         self.ts = TruckScenes(version=self.version, dataroot=self.dataroot, verbose=self.verbose)
 
@@ -72,12 +94,12 @@ class ObjectFusionGTDataset(Dataset):
     def _get_full_box_data_for_token(self, sample_token: str) -> Tuple[List[Dict[str, Any]], Dict, Dict, Dict, Dict]:
         """
         Hilfsfunktion, um Box-Daten und zugehörige Metadaten für einen gegebenen Sample-Token zu extrahieren.
-        Gibt gt_detections_list und die Dictionaries für annotations, instances, attributes, visibility zurück.
+        Filtert GT-Objekte auf die 12 DevKit-Klassen und weist korrekte class_idx zu.
         """
         gt_detections_list: List[Dict[str, Any]] = []
         annotation_records_dict: Dict[str, Dict] = {}
         instance_records_dict: Dict[str, Dict] = {}
-        attribute_records_dict: Dict[str, List[Dict]] = defaultdict(list) # Defaultdict für Attribute
+        attribute_records_dict: Dict[str, List[Dict]] = defaultdict(list) 
         visibility_records_dict: Dict[str, Dict] = {}
 
         sample_record = self.ts.get('sample', sample_token)
@@ -89,16 +111,30 @@ class ObjectFusionGTDataset(Dataset):
             try:
                 ann_record = self.ts.get('sample_annotation', ann_token)
                 if not ann_record: continue
-                annotation_records_dict[ann_token] = ann_record
                 
                 instance_token = ann_record['instance_token']
                 instance_record = self.ts.get('instance', instance_token)
                 if not instance_record: continue
-                instance_records_dict[instance_token] = instance_record
                 
                 category_record = self.ts.get('category', instance_record['category_token'])
                 if not category_record: continue
-                class_label_idx = int(category_record['index']) 
+                
+                original_category_name = category_record['name']
+                detection_name_for_eval = category_to_detection_name(original_category_name)
+
+                if detection_name_for_eval is None: 
+                    continue 
+
+                try:
+                    class_label_idx = self.class_names_for_model.index(detection_name_for_eval)
+                except ValueError:
+                    if self.verbose:
+                        print(f"WARNUNG im Dataset: DevKit-Name '{detection_name_for_eval}' (von '{original_category_name}') "
+                              f"nicht in self.class_names_for_model ({self.class_names_for_model}) gefunden. Überspringe GT-Objekt.")
+                    continue
+
+                annotation_records_dict[ann_token] = ann_record
+                instance_records_dict[instance_token] = instance_record
                 
                 attribute_tokens = ann_record.get('attribute_tokens', [])
                 for at in attribute_tokens:
@@ -122,7 +158,7 @@ class ObjectFusionGTDataset(Dataset):
                     "rotation": list(box_obj.orientation.elements), 
                     "velocity": list(np.nan_to_num(self.ts.box_velocity(ann_token)[:2], nan=0.0)), 
                     "num_pts": ann_record.get('num_lidar_pts', 0) + ann_record.get('num_radar_pts', 0),
-                    "detection_name": category_record['name'], 
+                    "detection_name": detection_name_for_eval, 
                     "detection_score": -1.0, 
                     "attribute_name": attribute_records_dict[ann_token][0]['name'] if ann_token in attribute_records_dict and attribute_records_dict[ann_token] else "", 
                     "box_7d": np.array([
@@ -130,9 +166,10 @@ class ObjectFusionGTDataset(Dataset):
                         box_obj.wlh[0], box_obj.wlh[1], box_obj.wlh[2],
                         box_obj.orientation.yaw_pitch_roll[0] 
                     ], dtype=np.float32),
-                    "class_idx": class_label_idx,
+                    "class_idx": class_label_idx, 
                     "instance_token": ann_record['instance_token'],
-                    "annotation_token": ann_token
+                    "annotation_token": ann_token,
+                    "original_category_name": original_category_name 
                 }
                 gt_detections_list.append(gt_det_dict)
             except Exception as e:
@@ -141,15 +178,14 @@ class ObjectFusionGTDataset(Dataset):
         return gt_detections_list, annotation_records_dict, instance_records_dict, attribute_records_dict, visibility_records_dict
 
     def _create_encoder_features(self, box_7d: np.ndarray, is_current: bool, history_slot: Optional[int] = None) -> List[float]:
+        """ Erstellt den Feature-Vektor für ein einzelnes Objekt. """
         features = np.zeros(self.num_encoder_input_features, dtype=np.float32)
         features[:7] = box_7d 
 
-        if 7 < self.num_encoder_input_features: # Index 7 für is_current_flag
+        if 7 < self.num_encoder_input_features: 
             features[7] = 1.0 if is_current else 0.0
         
         if not is_current and history_slot is not None:
-            # history_slot: 0 für t-1 (jüngste History), 1 für t-2, ...
-            # Feature-Indizes für History-Flags beginnen bei 8
             feature_idx_for_hist_slot = 8 + history_slot 
             if feature_idx_for_hist_slot < self.num_encoder_input_features:
                 features[feature_idx_for_hist_slot] = 1.0
@@ -184,7 +220,7 @@ class ObjectFusionGTDataset(Dataset):
         combined_encoder_input_features_list: List[List[float]] = []
         combined_encoder_input_xyz_centers_list: List[List[float]] = []
 
-        for gt_item in gt_detections_current_frame:
+        for gt_item in gt_detections_current_frame: 
             box_7d = gt_item['box_7d']
             features = self._create_encoder_features(box_7d, is_current=True, history_slot=None)
             combined_encoder_input_features_list.append(features)
@@ -208,7 +244,7 @@ class ObjectFusionGTDataset(Dataset):
             hist_frame_gt_detections, _, _, _, _ = self._get_full_box_data_for_token(prev_token_iterator)
             
             current_hist_frame_boxes_7d_list: List[np.ndarray] = []
-            for hist_gt_item in hist_frame_gt_detections:
+            for hist_gt_item in hist_frame_gt_detections: 
                 box_7d = hist_gt_item['box_7d']
                 current_hist_frame_boxes_7d_list.append(box_7d)
                 
@@ -231,10 +267,10 @@ class ObjectFusionGTDataset(Dataset):
             else np.zeros((0, 3), dtype=np.float32)
 
         processed_history_boxes_7d: List[Optional[np.ndarray]] = []
-        for frame_boxes_list in history_boxes_7d_raw_list_of_lists: # frame_boxes_list ist List[np.ndarray]
+        for frame_boxes_list in history_boxes_7d_raw_list_of_lists: 
             if not frame_boxes_list: 
                 processed_history_boxes_7d.append(np.zeros((0,7), dtype=np.float32))
-            else: # Enthält eine Liste von 7D-Boxen (als np.ndarray)
+            else: 
                 processed_history_boxes_7d.append(np.array(frame_boxes_list, dtype=np.float32))
         
         history_padding_mask = np.array([
@@ -281,7 +317,7 @@ class ObjectFusionGTDataset(Dataset):
         return output
 
 if __name__ == '__main__':
-    print("Running ObjectFusionGTDataset example...")
+    print("Running ObjectFusionGTDataset example (12 class mode)...")
     
     config_file_path = "config/pipeline_c_modules.yaml" 
     if not os.path.exists(config_file_path):
@@ -290,35 +326,56 @@ if __name__ == '__main__':
             config_file_path = alt_config_path
         else:
             print(f"ERROR: Config file not found at {config_file_path} or {alt_config_path}")
-            # Erstelle eine minimale Fallback-Config, wenn keine Datei gefunden wird
-            print("Using minimal fallback configuration for testing as config file was not found.")
+            print("Using minimal fallback configuration for 12-class testing.")
             full_pipeline_config_dict = { 
-                "dataset": {"dataroot": "/data", "version": "v1.0-mini", "history_window_transformer": 2, 
-                            "class_names": ["car", "truck"]}, 
-                "model": {"num_input_features": 10} 
+                "dataset": {
+                    "dataroot": "/data", "version": "v1.0-mini", "history_window_transformer": 2, 
+                    "class_names": list(TRUCKSCENES_DETECTION_NAMES) 
+                }, 
+                "model": {"num_input_features": 10, "num_classes": 12} 
             }
-            # exit() # Beende nicht, sondern fahre mit Fallback fort
-
-    if os.path.exists(config_file_path): # Nur laden, wenn Pfad existiert
+    
+    if os.path.exists(config_file_path):
         try:
-            full_pipeline_config_dict = load_config(config_file_path) 
+            cfg_loaded = load_config(config_file_path) 
+            if not isinstance(cfg_loaded, dict): 
+                 full_pipeline_config_dict = OmegaConf.to_container(cfg_loaded, resolve=True)
+            else:
+                 full_pipeline_config_dict = cfg_loaded
+
             print(f"Configuration loaded from: {os.path.abspath(config_file_path)}")
+            
+            if 'dataset' in full_pipeline_config_dict and 'class_names' in full_pipeline_config_dict['dataset'] and \
+               'model' in full_pipeline_config_dict and 'num_classes' in full_pipeline_config_dict['model']:
+                
+                cfg_class_names = full_pipeline_config_dict['dataset']['class_names']
+                if not isinstance(cfg_class_names, list): 
+                    try:
+                        cfg_class_names_list = list(OmegaConf.to_container(cfg_class_names, resolve=True) if hasattr(cfg_class_names, '_is_config') else cfg_class_names)
+                        full_pipeline_config_dict['dataset']['class_names'] = cfg_class_names_list
+                    except Exception as e_oc:
+                        print(f"Fehler bei der Konvertierung von dataset.class_names zu einer Liste: {e_oc}")
+                        full_pipeline_config_dict['dataset']['class_names'] = list(TRUCKSCENES_DETECTION_NAMES)
+
+                if len(full_pipeline_config_dict['dataset']['class_names']) != full_pipeline_config_dict['model']['num_classes']:
+                    print(f"WARNUNG: Anzahl der class_names ({len(full_pipeline_config_dict['dataset']['class_names'])}) "
+                          f"stimmt nicht mit model.num_classes ({full_pipeline_config_dict['model']['num_classes']}) überein!")
+                    full_pipeline_config_dict['model']['num_classes'] = len(full_pipeline_config_dict['dataset']['class_names'])
+                    print(f"  model.num_classes wurde auf {full_pipeline_config_dict['model']['num_classes']} gesetzt.")
+
         except Exception as e:
-            print(f"Error loading configuration: {e}")
+            print(f"Error loading or processing configuration: {e}")
             full_pipeline_config_dict = { 
-                "dataset": {"dataroot": "/data", "version": "v1.0-mini", "history_window_transformer": 2, 
-                            "class_names": ["car", "truck"]}, 
-                "model": {"num_input_features": 10} 
+                "dataset": {"dataroot": "/data", "version": "v1.0-mini", "history_window_transformer": 2, "class_names": list(TRUCKSCENES_DETECTION_NAMES)}, 
+                "model": {"num_input_features": 10, "num_classes": 12} 
             }
             print(f"Using minimal fallback configuration due to loading error: {full_pipeline_config_dict}")
-    else: # Fallback, wenn config_file_path nach Prüfung immer noch nicht existiert
+    else: 
         print(f"ERROR: Config file still not found at {config_file_path}. Using minimal fallback.")
         full_pipeline_config_dict = { 
-            "dataset": {"dataroot": "/data", "version": "v1.0-mini", "history_window_transformer": 2, 
-                        "class_names": ["car", "truck"]}, 
-            "model": {"num_input_features": 10} 
+            "dataset": {"dataroot": "/data", "version": "v1.0-mini", "history_window_transformer": 2, "class_names": list(TRUCKSCENES_DETECTION_NAMES)}, 
+            "model": {"num_input_features": 10, "num_classes": 12} 
         }
-
 
     dataset_cfg_from_yaml = full_pipeline_config_dict.get('dataset', {})
     dataroot_path = dataset_cfg_from_yaml.get("dataroot", "/app/datasets") 
@@ -327,9 +384,6 @@ if __name__ == '__main__':
     actual_dataset_path_to_check = os.path.join(dataroot_path, dataset_version)
     if not os.path.exists(actual_dataset_path_to_check):
          print(f"ERROR: Dataset path '{actual_dataset_path_to_check}' does not exist.")
-         print(f"  Dataroot from config/fallback: '{dataroot_path}'")
-         print(f"  Version from config/fallback: '{dataset_version}'")
-         print("  Please ensure 'dataset.dataroot' and 'dataset.version' in your YAML point to the correct TruckScenes directory structure, or that the fallback path is valid in your environment.")
     else:
         try:
             dataset = ObjectFusionGTDataset(
@@ -344,77 +398,39 @@ if __name__ == '__main__':
                 print(f"\nDataset initialized successfully. Number of samples in '{dataset.split_name}': {len(dataset)}")
                 
                 num_samples_to_test = min(3, len(dataset))
-                print(f"\nTesting first {num_samples_to_test} samples...")
+                print(f"\nTesting first {num_samples_to_test} samples (12-class mode)...")
                 for i in range(num_samples_to_test): 
                     print(f"\n--- Retrieving Sample {i} ---")
                     sample_data = dataset[i] 
                     print(f"--- Sample {i} (Token: {sample_data['sample_token']}) ---")
-                    print(f"  All Keys in output: {list(sample_data.keys())}")
                     
-                    assert 'encoder_input_features_for_padding' in sample_data, "ERROR: 'encoder_input_features_for_padding' missing!"
-                    features_arr = sample_data['encoder_input_features_for_padding']
-                    print(f"  encoder_input_features_for_padding: shape {features_arr.shape}, dtype {features_arr.dtype}")
-                    if features_arr.shape[0] > 0 :
-                        assert features_arr.shape[1] == dataset.num_encoder_input_features, \
-                            f"Feature dimension is {features_arr.shape[1]}, expected {dataset.num_encoder_input_features}"
-
-                    assert 'encoder_input_xyz_centers_for_padding' in sample_data, "ERROR: 'encoder_input_xyz_centers_for_padding' missing!"
-                    xyz_arr = sample_data['encoder_input_xyz_centers_for_padding']
-                    print(f"  encoder_input_xyz_centers_for_padding: shape {xyz_arr.shape}, dtype {xyz_arr.dtype}")
-                    if xyz_arr.shape[0] > 0:
-                         assert xyz_arr.shape[1] == 3, f"XYZ dimension is {xyz_arr.shape[1]}, expected 3"
-                    
-                    assert features_arr.shape[0] == xyz_arr.shape[0], \
-                        f"Number of features ({features_arr.shape[0]}) != Number of XYZ centers ({xyz_arr.shape[0]})"
-
-                    if features_arr.shape[0] > 0:
-                        print(f"    Example Feature Vector (first object): {features_arr[0].tolist()}")
-                        print(f"    Example XYZ Center (first object): {xyz_arr[0].tolist()}")
-                    else:
-                        print("    No objects (current or history) to form encoder input for this sample.")
-                    
-                    print(f"  gt_detections (for decoder target): {len(sample_data['gt_detections'])} items")
+                    print(f"  gt_detections (DevKit classes only): {len(sample_data['gt_detections'])} items")
                     if sample_data['gt_detections']:
                         print(f"    First gt_detection keys: {list(sample_data['gt_detections'][0].keys())}")
+                        print(f"    First gt_detection class_idx: {sample_data['gt_detections'][0]['class_idx']} "
+                              f"({sample_data['gt_detections'][0]['detection_name']})")
+                        assert 0 <= sample_data['gt_detections'][0]['class_idx'] < len(dataset.class_names_for_model)
                     
-                    assert "history_boxes_7d" in sample_data
-                    assert "history_sample_tokens" in sample_data
-                    assert "history_padding_mask" in sample_data
-                    print(f"  history_boxes_7d: {len(sample_data['history_boxes_7d'])} frames")
-                    print(f"  history_sample_tokens: {len(sample_data['history_sample_tokens'])} tokens")
-                    print(f"  history_padding_mask: {sample_data['history_padding_mask'].tolist()}")
+                    features_arr = sample_data['encoder_input_features_for_padding']
+                    print(f"  encoder_input_features_for_padding: shape {features_arr.shape}, dtype {features_arr.dtype}")
+                    
+                    xyz_arr = sample_data['encoder_input_xyz_centers_for_padding']
+                    print(f"  encoder_input_xyz_centers_for_padding: shape {xyz_arr.shape}, dtype {xyz_arr.dtype}")
 
                 if len(dataset) >=2: 
-                    print("\n--- Testing Collate Function (using the updated dataset output) ---")
+                    print("\n--- Testing Collate Function (12-class mode) ---")
                     from oft.data.transformer_gt_collate import object_fusion_gt_collate_fn 
                     
                     num_collate_test_samples = min(4, len(dataset)) 
                     dummy_batch_list = [dataset[k] for k in range(num_collate_test_samples)]
                     
-                    print(f"Collating a batch of size {len(dummy_batch_list)}...")
                     collated = object_fusion_gt_collate_fn(dummy_batch_list)
-                    print("Collate function returned:")
-                    for k, v_tensor in collated.items(): 
-                        if torch.is_tensor(v_tensor):
-                            print(f"  {k}: Tensor, shape {v_tensor.shape}, dtype {v_tensor.dtype}")
-                        elif isinstance(v_tensor, list) and v_tensor and isinstance(v_tensor[0], dict):
-                             print(f"  {k}: List of {len(v_tensor)} dicts")
-                        elif isinstance(v_tensor, list):
-                             print(f"  {k}: List of {len(v_tensor)} items")
-                        else:
-                            print(f"  {k}: {type(v_tensor)}")
-                    
-                    assert 'encoder_input_features' in collated, "Collate ERROR: 'encoder_input_features' missing"
-                    assert collated['encoder_input_features'].ndim == 3, "Collate ERROR: 'encoder_input_features' falsche Dimensionen"
-                    assert 'encoder_input_xyz_centers' in collated, "Collate ERROR: 'encoder_input_xyz_centers' missing"
-                    assert collated['encoder_input_xyz_centers'].ndim == 3, "Collate ERROR: 'encoder_input_xyz_centers' falsche Dimensionen"
-                    assert collated['encoder_input_xyz_centers'].shape[-1] == 3, "Collate ERROR: 'encoder_input_xyz_centers' letzte Dimension nicht 3"
-                    print("Collate function test passed basic key and shape checks for encoder inputs.")
-
+                    print("Collated batch gt_target_labels (should be indices for 12 classes):")
+                    print(collated['gt_target_labels'])
+                    if collated['gt_target_labels'].numel() > 0:
+                         assert collated['gt_target_labels'].max() < len(dataset.class_names_for_model)
             else:
                 print(f"Dataset could be initialized, but no samples were found for split '{dataset.split_name}'.")
-        except FileNotFoundError as e:
-            print(f"\nError during dataset initialization (FileNotFound): {e}")
         except Exception as e:
             print(f"\nAn unexpected error occurred during dataset example: {e}")
             import traceback

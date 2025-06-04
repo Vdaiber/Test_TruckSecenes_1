@@ -1,150 +1,119 @@
-# Konfigurationsdatei für die Transformer-basierte C-Modul-Pipeline
+# Konfigurationsdatei für die Transformer-basierte C-Modul-Pipeline (12 Klassen)
 
 # 1. Dataset-Konfiguration (für C1: ObjectFusionGTDataset)
 dataset:
-  dataroot:         /data  # Hauptverzeichnis, in dem sich der Datensatz (z.B. TruckScenes) befindet.
-  version:          v1.0-mini # Version des Datensatzes (z.B. "v1.0-mini", "v1.0-trainval").
-  history_window_transformer: 2 # Anzahl der vorherigen Zeitschritte (Frames), deren Objekte als Historie für den Transformer berücksichtigt werden.
-  
-  # Mapping von Kategorie-Index (aus der category.json des Datensatzes) zu menschenlesbaren Klassennamen.
-  # Diese Reihenfolge MUSS exakt mit der Output-Reihenfolge des Klassifikations-Kopfes des Modells übereinstimmen
-  # (die Hintergrund-/Kein-Objekt-Klasse wird typischerweise vom Modell implizit oder als letzte Klasse hinzugefügt).
-  class_names: # Index 0, 1, ..., N-1 (insgesamt N Klassen, hier 28)
-    - "animal"
-    - "human.pedestrian.adult"
-    - "human.pedestrian.child"
-    - "human.pedestrian.construction_worker"
-    - "human.pedestrian.personal_mobility"
-    - "human.pedestrian.police_officer"
-    - "human.pedestrian.stroller"
-    - "human.pedestrian.wheelchair"
-    - "movable_object.barrier"
-    - "movable_object.debris"
-    - "movable_object.pushable_pullable"
-    - "movable_object.trafficcone"
-    - "static_object.bicycle_rack"
-    - "static_object.bollard"
-    - "static_object.traffic_island"
-    - "vehicle.bicycle"
-    - "vehicle.bus.coach"
-    - "vehicle.bus.rigid"
-    - "vehicle.car"
-    - "vehicle.construction"
-    - "vehicle.emergency.ambulance"
-    - "vehicle.emergency.police"
-    - "vehicle.motorcycle"
-    - "vehicle.trailer"
-    - "vehicle.truck"
-    - "vehicle.truck_cabin"
-    - "vehicle.van"
-    - "vehicle.wheeled_device"
+  dataroot: /data # Hauptverzeichnis, in dem sich der Datensatz (z.B. TruckScenes) befindet
+  version: v1.0-mini # Version des Datensatzes (z.B. "v1.0-mini", "v1.0-trainval")
+  history_window_transformer: 2 # Anzahl der vorherigen Zeitschritte (Frames), deren Objekte als Historie für den Transformer berücksichtigt werden
+
+  # Reduziert auf die 12 offiziellen TRUCKSCENES_DETECTION_NAMES
+  class_names:
+    - "car" # PKW
+    - "truck" # LKW
+    - "bus" # Bus
+    - "trailer" # Anhänger
+    - "other_vehicle" # Sammelkategorie für z.B. vehicle.construction, vehicle.van etc.
+    - "pedestrian" # Fußgänger
+    - "motorcycle" # Motorrad
+    - "bicycle" # Fahrrad
+    - "traffic_cone" # Verkehrshütchen
+    - "barrier" # Absperrung
+    - "animal" # Tier
+    - "traffic_sign" # Verkehrszeichen
 
 # 2. Modell-Konfiguration (für C2: ObjectEncoder & C3: ObjectFusionTransformerDecoder)
 model:
-  d_model: 300                    # Interne Feature-Dimension des Transformer-Modells (Encoder und Decoder).
-  nhead: 6                        # Anzahl der Attention-Heads in den Multi-Head-Attention-Layern. Muss ein Teiler von d_model sein.
-  dropout: 0.1                    # Dropout-Rate, die in verschiedenen Teilen des Modells (Attention, FFNs) verwendet wird.
-  activation: "relu"              # Aktivierungsfunktion in den Feed-Forward-Netzwerken (FFN) der Transformer-Layer (z.B. "relu", "gelu").
-  
+  d_model: 300 # Interne Feature-Dimension des Transformer-Modells (Encoder und Decoder)
+  nhead: 6 # Anzahl der Attention-Heads in den Multi-Head-Attention-Layern. Muss ein Teiler von d_model sein
+  dropout: 0.1 # Dropout-Rate, die in verschiedenen Teilen des Modells (Attention, FFNs) verwendet wird
+  activation: "relu" # Aktivierungsfunktion in den Feed-Forward-Netzwerken (FFN) der Transformer-Layer
+
   # Encoder-spezifische Parameter
-  num_input_features: 10          # Dimensionalität des Feature-Vektors für jedes Eingabeobjekt an den Encoder.
-  num_encoder_layers: 3           # Anzahl der übereinander gestapelten Transformer-Encoder-Layer.
-  dim_feedforward_encoder: 1024   # Dimension der Hidden-Layer in den FFNs des Encoders. Oft 4 * d_model.
-  pe_max_coord_val: 1000000.0     # KORRIGIERT: Maximal erwarteter Koordinatenwert (in Metern) für die Skalierung der Positions-Encodings. Angepasst an große Weltkoordinaten.
-  
+  num_input_features: 10 # Dimensionalität des Feature-Vektors für jedes Eingabeobjekt an den Encoder
+  num_encoder_layers: 3 # Anzahl der übereinander gestapelten Transformer-Encoder-Layer
+  dim_feedforward_encoder: 1024 # Dimension der Hidden-Layer in den FFNs des Encoders. Oft 4 * d_model
+  pe_max_coord_val: 1000000.0 # Maximal erwarteter Koordinatenwert (in Metern) für die Skalierung der Positions-Encodings
+
   # Decoder-spezifische Parameter
-  num_decoder_layers: 3           # Anzahl der übereinander gestapelten Transformer-Decoder-Layer.
-  dim_feedforward_decoder: 1024   # Dimension der Hidden-Layer in den FFNs des Decoders. Oft 4 * d_model.
-  num_queries: 100                # Anzahl der lernbaren Objekt-Queries im Decoder. Bestimmt die maximale Anzahl von Objekten, die das Modell vorhersagen kann.
-  
+  num_decoder_layers: 3 # Anzahl der übereinander gestapelten Transformer-Decoder-Layer
+  dim_feedforward_decoder: 1024 # Dimension der Hidden-Layer in den FFNs des Decoders. Oft 4 * d_model
+  num_queries: 100 # Anzahl der lernbaren Objekt-Queries im Decoder. Bestimmt die maximale Anzahl von Objekten, die das Modell vorhersagen kann
+
   # Vorhersagekopf-Parameter
-  num_classes: 28                 # Anzahl der zu unterscheidenden Objektklassen. Muss len(dataset.class_names) entsprechen.
-  box_dim: 7                      # Dimensionalität der vorhergesagten Bounding-Box-Parameter (z.B. 7 für cx, cy, cz, w, l, h, yaw).
+  num_classes: 12 # Anzahl der zu unterscheidenden Objektklassen (entspricht len(dataset.class_names))
+  box_dim: 7 # Dimensionalität der vorhergesagten Bounding-Box-Parameter (cx, cy, cz, w, l, h, yaw)
 
 # 3. Verlustfunktion (C4: SetCriterion & HungarianMatcher)
 loss:
   # Kosten-Gewichte für den Hungarian Matcher (Zuordnung von Vorhersagen zu Ground Truth)
-  cost_class_weight: 2.0          # Gewicht für die Klassifikationskosten (z.B. negative Log-Likelihood der korrekten Klasse).
-  cost_bbox_l1_weight: 5.0        # Gewicht für die L1-Distanzkosten der Bounding-Box-Parameter.
-  cost_giou_bev_weight: 2.0       # Gewicht für die GIoU-Kosten (im BEV) der Bounding Boxes.
-  
+  cost_class_weight: 2.0 # Gewicht für die Klassifikationskosten
+  cost_bbox_l1_weight: 5.0 # Gewicht für die L1-Distanzkosten der Bounding-Box-Parameter
+  cost_giou_bev_weight: 2.0 # Gewicht für die GIoU-Kosten (im BEV) der Bounding Boxes
+
   # Parameter für die SetCriterion Verlustberechnung
-  eos_coefficient: 0.1            # Gewicht für die "kein Objekt" (end-of-sequence) Klasse im Klassifikationsverlust (CrossEntropy). Reduziert den Einfluss der Hintergrundklasse.
-  losses_to_compute:              # Liste der einzelnen Verlustkomponenten, die berechnet und summiert werden sollen.
-    - labels                      # Klassifikationsverlust (typischerweise CrossEntropy).
-    - boxes_l1                    # L1-Regressionsverlust für Bounding Boxes.
-    - giou_bev                    # GIoU-Verlust im BEV für Bounding Boxes.
-  
-  # Gewichte für die einzelnen Verlustkomponenten in der Gesamtverlustfunktion.
-  # Die Schlüssel hier müssen exakt mit den Schlüsseln übereinstimmen, die von SetCriterion zurückgegeben werden.
+  eos_coefficient: 0.1 # Gewicht für die "kein Objekt" Klasse im Klassifikationsverlust
+  losses_to_compute: # Liste der einzelnen Verlustkomponenten
+    - labels # Klassifikationsverlust
+    - boxes_l1 # L1-Verlust für Bounding Boxes
+    - giou_bev # GIoU-Verlust im BEV
+
   loss_weight_dict:
-    loss_ce: 1.0                  # Gewicht für den CrossEntropy-Klassifikationsverlust.
-    loss_bbox_l1: 5.0             # Gewicht für den L1 Bounding-Box-Regressionsverlust.
-    loss_giou: 2.0                # Gewicht für den GIoU Bounding-Box-Regressionsverlust (im BEV). Schlüssel wurde von 'loss_giou_bev' zu 'loss_giou' geändert, um internen Schlüssel in SetCriterion zu matchen.
+    loss_ce: 1.0 # Gewicht für den Cross-Entropy Verlust
+    loss_bbox_l1: 5.0 # Gewicht für den L1-Verlust der Bounding Boxes
+    loss_giou: 2.0 # Gewicht für den GIoU-Verlust
 
 # 4. Trainingseinstellungen (für C5: Trainingsloop)
 training:
-  epochs: 1                       # Für schnelles Debugging auf 1 gesetzt.
-  batch_size: 4                   # Anzahl der Samples pro Batch und pro GPU (falls DataParallel verwendet wird).
-  learning_rate: 0.0001           # Initiale Lernrate für den Optimizer.
-  weight_decay: 0.0001            # Gewichtungsfaktor für die L2-Regularisierung (Weight Decay) im Optimizer.
-  lr_drop_epoch: 40               # Epoche, nach der die Lernrate reduziert wird (bei Verwendung eines StepLR Schedulers).
-  lr_scheduler_gamma: 0.1         # Faktor, um den die Lernrate reduziert wird (gamma für StepLR).
-  clip_max_norm: 0.1              # Maximaler Normwert für Gradient Clipping, um explodierende Gradienten zu verhindern. 0 deaktiviert Clipping.
-  num_workers: 2                  # Anzahl der parallelen Prozesse für das Laden der Daten.
-  device: "cpu"                   # Gerät für das Training ("cpu", "cuda" für NVIDIA GPUs, "mps" für Apple Silicon - mps oft problematisch in Docker).
-  use_dataparallel: false         # Ob torch.nn.DataParallel für Multi-GPU-Training verwendet werden soll (einfachere, aber oft weniger effiziente Multi-GPU-Methode).
-  checkpoint_dir: "./checkpoints_oft_c_pipeline" # Verzeichnis zum Speichern der Modell-Checkpoints.
-  resume_checkpoint: null         # Pfad zu einem spezifischen Checkpoint (.pth.tar), von dem das Training fortgesetzt werden soll. `null` startet von vorne.
-  resume_if_checkpoint_exists: true # Wenn true, wird versucht, vom neuesten Checkpoint im `checkpoint_dir` (oft `*_latest.pth.tar`) fortzusetzen.
-  save_every_k_epochs: 5          # Frequenz (in Epochen) für das Speichern von Checkpoints, zusätzlich zum neuesten und besten.
-  print_freq: 1                   # Für schnelles Debugging auf 1 gesetzt, um jeden Batch zu sehen.
-  print_freq_val: 5               # Frequenz (in Batches/Iterationen) für das Ausgeben von Validierungsstatistiken.
-  train_split_name: "mini_train"  # Name des Splits aus dem Datensatz, der für das Training verwendet wird.
-  val_split_name: "mini_val"      # Name des Splits aus dem Datensatz, der für die Validierung verwendet wird.
+  epochs: 20 # Anzahl der Trainingsepochen
+  batch_size: 2 # Batch-Größe
+  learning_rate: 0.0001 # Lernrate für den Optimierer
+  weight_decay: 0.0001 # L2-Regularisierung
+  lr_drop_epoch: 40 # Epoche, in der die Lernrate reduziert wird
+  lr_scheduler_gamma: 0.1 # Faktor für die Lernratenreduktion
+  clip_max_norm: 0.1 # Maximale Gradientennorm für Gradient Clipping
+  num_workers: 0 # Anzahl der Worker für das Data Loading (0 für CPU-Training)
+  device: "cpu" # Trainingsgerät ("cpu", "cuda", "mps")
+  use_dataparallel: false # Ob DataParallel verwendet werden soll
+  checkpoint_dir: "./checkpoints_oft_c_pipeline_12cls" # Verzeichnis für Modell-Checkpoints
+  resume_checkpoint: null # Pfad zum Checkpoint für das Fortsetzen des Trainings
+  resume_if_checkpoint_exists: true # Ob automatisch fortgesetzt werden soll
+  save_every_k_epochs: 5 # Häufigkeit des Speicherns von Checkpoints
+  print_freq: 50 # Logging-Frequenz während des Trainings (Batches)
+  print_freq_val: 5 # Logging-Frequenz während der Validierung
+  train_split_name: "mini_train" # Name des Trainings-Splits
+  val_split_name: "mini_val" # Name des Validierungs-Splits
 
-# 5. Visualisierungs- und Rendering-Standardeinstellungen (optional, z.B. für Hilfsskripte)
+# 5. Visualisierungs- und Rendering-Standardeinstellungen
 visualization:
-  camera_channel: "CAMERA_LEFT_FRONT" # Standard-Kamerakanal für Visualisierungen.
+  camera_channel: "CAMERA_LEFT_FRONT" # Kamerakanal für die Visualisierung
 
-render: 
-  line_thickness: 2               # Linienstärke für gezeichnete Bounding Boxes.
-  color_mode: "category"          # Farbmodus für Boxen ("category": Farbe nach Klasse, "score": Farbe nach Konfidenz).
-  custom_colormap: null           # Pfad zu einer optionalen, benutzerdefinierten Farbpalette.
-  z_threshold: 0.5                # Z-Wert (Tiefe in Metern), ab dem Objekte in Kamerabildern nicht mehr gezeichnet werden (filtert zu nahe Objekte).
-  box_visibility: "ANY"           # Bedingung für die Sichtbarkeit von Boxen in der Kamera (z.B. "ANY": teilweise sichtbar, "ALL": komplett sichtbar).
+render:
+  line_thickness: 2 # Dicke der Linien beim Rendern
+  color_mode: "category" # Farbmodus für die Visualisierung
+  custom_colormap: null # Benutzerdefinierte Farbkarte
+  z_threshold: 0.5 # Schwellenwert für die Z-Koordinate
+  box_visibility: "ANY" # Sichtbarkeitskriterium für Bounding Boxes
 
-# 6. Evaluationseinstellungen (für C5: evaluate_model mit TruckScenes DevKit)
+# 6. Evaluationseinstellungen
 evaluation:
-  eval_split_name: "mini_val"     # Welcher Split für die finale Evaluation mit dem DevKit verwendet wird.
-  
-  # Meta-Informationen, die in die JSON-Datei für die DevKit-Submission geschrieben werden.
-  # Geben an, welche Sensordaten von der Methode verwendet wurden.
+  eval_split_name: "mini_val" # Name des Evaluierungs-Splits
   devkit_meta:
-    use_camera: true              # Wahr, wenn Kameradaten verwendet wurden.
-    use_lidar: true               # Wahr, wenn LiDAR-Daten verwendet wurden.
-    use_radar: false              # Wahr, wenn Radardaten verwendet wurden.
-    use_map: false                # Wahr, wenn Kartendaten (HD-Map) verwendet wurden.
-    use_external: false           # Wahr, wenn externe Datenquellen verwendet wurden.
-    
-  # Parameter für das `DetectionConfig`-Objekt des TruckScenes DevKits.
-  # Steuern, wie die Evaluation (Matching, Metrikberechnung) durchgeführt wird.
-  eval_detection_cfg:
-    class_range: null             # Maximale Detektionsdistanz pro Klasse (in Metern). `null` bedeutet oft, dass Standardwerte des DevKits verwendet werden.
-    dist_fcn: "center_distance"   # Distanzfunktion für das Matching von Vorhersagen zu Ground Truth. Optionen sind typischerweise "center_distance" (3D) oder "iou_bev" (2D BEV IoU).
-    dist_ths: [0.5, 1.0, 2.0, 4.0]# Liste von Distanzschwellenwerten (in Metern für 'center_distance', oder IoU-Werte für 'iou_bev') für das True-Positive-Matching.
-    iou_ths_bev: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] # BEV IoU-Schwellenwerte, oft für die Berechnung von Average Precision (AP) verwendet (z.B. COCO-Style [0.5:0.05:0.95]).
-    conf_th_eval: 0.1             # Konfidenz-Schwellenwert, um Vorhersagen vor der Evaluation zu filtern. Nur Boxen mit Score > conf_th_eval werden berücksichtigt.
-    min_recall: 0.0               # Minimaler Recall-Wert für die Berechnung der Precision-Recall-Kurve.
-    max_boxes_per_sample: 100     # Maximale Anzahl von Vorhersagen pro Sample, die nach dem Filtern (z.B. per Konfidenz) in die Evaluation eingehen.
-    min_points_per_box: 0         # Mindestanzahl an LiDAR- oder Radar-Punkten in einer Ground-Truth-Box, damit diese für die Evaluation berücksichtigt wird (0 = alle GT-Boxen verwenden).
-    step_size_recall_pr: 101      # Anzahl der diskreten Schritte (Punkte) auf der Recall-Achse für die Interpolation der Precision-Recall-Kurve.
+    use_camera: true # Ob Kameradaten verwendet werden sollen
+    use_lidar: true # Ob LiDAR-Daten verwendet werden sollen
+    use_radar: false # Ob Radar-Daten verwendet werden sollen
+    use_map: false # Ob Karten-Daten verwendet werden sollen
+    use_external: false # Ob externe Daten verwendet werden sollen
 
-    # Spezifische Parameter für das TruckScenes DevKit (oft von nuScenes Evaluation abgeleitet)
-    class_names_map_nuscenes_detailed: false # Sollte für TruckScenes-Standardkategorien auf `false` stehen. True würde eine alternative (detailliertere) Klassenliste erwarten.
-    dist_fcn_callable: null       # Wird intern vom DevKit basierend auf `dist_fcn` gesetzt. Nicht manuell konfigurieren.
-    reset_global_cfg: true        # Ob die globale Konfiguration des DevKits vor der Evaluation zurückgesetzt werden soll.
-    # Parameter, die im Code als Default verwendet werden, falls nicht in YAML:
-    # dist_th_tp: 2.0 (abgeleitet von dist_ths[2])
-    # min_precision: 0.1
-    # mean_ap_weight: 5
+  eval_detection_cfg:
+    class_range: null # Bereich der zu evaluierenden Klassen
+    dist_fcn: "center_distance" # Distanzfunktion für die Evaluierung
+    dist_ths: [0.5, 1.0, 2.0, 4.0] # Distanzschwellenwerte für die Evaluierung
+    iou_ths_bev: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] # IoU-Schwellenwerte im BEV
+    conf_th_eval: 0.1 # Konfidenzschwellenwert für die Evaluierung
+    min_recall: 0.0 # Minimaler Recall-Wert
+    max_boxes_per_sample: 100 # Maximale Anzahl von Boxen pro Sample
+    min_points_per_box: 0 # Minimale Anzahl von Punkten pro Box
+    step_size_recall_pr: 101 # Schrittweite für Precision-Recall-Kurve
+    class_names_map_nuscenes_detailed: false # Ob detaillierte NuScenes-Klassennamen verwendet werden sollen
+    dist_fcn_callable: null # Benutzerdefinierte Distanzfunktion
+    reset_global_cfg: true # Ob die globale Konfiguration zurückgesetzt werden soll
