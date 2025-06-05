@@ -1,6 +1,0 @@
-- training.epochs=20
-- training.print_freq=50
-- training.batch_size=2
-- dataset.dataroot=/data
-- dataset.version=v1.0-mini
-- model.pe_max_coord_val=1000000.0

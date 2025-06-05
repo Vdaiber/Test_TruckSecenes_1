@@ -24,18 +24,18 @@ dataset:
 # 2. Modell-Konfiguration (für C2: ObjectEncoder & C3: ObjectFusionTransformerDecoder)
 model:
   d_model: 300 # Interne Feature-Dimension des Transformer-Modells (Encoder und Decoder)
-  nhead: 6 # Anzahl der Attention-Heads in den Multi-Head-Attention-Layern. Muss ein Teiler von d_model sein
+  nhead: 2 # Anzahl der Attention-Heads in den Multi-Head-Attention-Layern. Muss ein Teiler von d_model sein
   dropout: 0.1 # Dropout-Rate, die in verschiedenen Teilen des Modells (Attention, FFNs) verwendet wird
   activation: "relu" # Aktivierungsfunktion in den Feed-Forward-Netzwerken (FFN) der Transformer-Layer
 
   # Encoder-spezifische Parameter
   num_input_features: 10 # Dimensionalität des Feature-Vektors für jedes Eingabeobjekt an den Encoder
-  num_encoder_layers: 3 # Anzahl der übereinander gestapelten Transformer-Encoder-Layer
+  num_encoder_layers: 1 # Anzahl der übereinander gestapelten Transformer-Encoder-Layer
   dim_feedforward_encoder: 1024 # Dimension der Hidden-Layer in den FFNs des Encoders. Oft 4 * d_model
-  pe_max_coord_val: 1000000.0 # Maximal erwarteter Koordinatenwert (in Metern) für die Skalierung der Positions-Encodings
+  pe_max_coord_val: 150.0 # Maximal erwarteter Koordinatenwert (in Metern) für die Skalierung der Positions-Encodings
 
   # Decoder-spezifische Parameter
-  num_decoder_layers: 3 # Anzahl der übereinander gestapelten Transformer-Decoder-Layer
+  num_decoder_layers: 1 # Anzahl der übereinander gestapelten Transformer-Decoder-Layer
   dim_feedforward_decoder: 1024 # Dimension der Hidden-Layer in den FFNs des Decoders. Oft 4 * d_model
   num_queries: 100 # Anzahl der lernbaren Objekt-Queries im Decoder. Bestimmt die maximale Anzahl von Objekten, die das Modell vorhersagen kann
 
@@ -64,7 +64,7 @@ loss:
 
 # 4. Trainingseinstellungen (für C5: Trainingsloop)
 training:
-  epochs: 20 # Anzahl der Trainingsepochen
+  epochs: 1 # Anzahl der Trainingsepochen
   batch_size: 2 # Batch-Größe
   learning_rate: 0.0001 # Lernrate für den Optimierer
   weight_decay: 0.0001 # L2-Regularisierung
@@ -76,9 +76,15 @@ training:
   use_dataparallel: false # Ob DataParallel verwendet werden soll
   checkpoint_dir: "./checkpoints_oft_c_pipeline_12cls" # Verzeichnis für Modell-Checkpoints
   resume_checkpoint: null # Pfad zum Checkpoint für das Fortsetzen des Trainings
+  seed: 42 # Setze hier deinen gewünschten Seed für Reproduzierbarkeit
+  log_level: "INFO" # Mögliche Werte: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  dataset_verbose: true # Ob das Dataset beim Initialisieren viele Infos ausgibt
+  debug_sequential_sampler: false # Setze auf true, um den RandomSampler im Training für Debugging durch SequentialSampler zu ersetzen
+  checkpoint_subdir: "checkpoints" # Unterverzeichnis im Hydra Run Dir für Checkpoints
+  run_only_one_epoch_for_debug: true # Setze auf true, um nach der ersten Epoche abzubrechen (nützlich für schnelle Tests)
   resume_if_checkpoint_exists: true # Ob automatisch fortgesetzt werden soll
   save_every_k_epochs: 5 # Häufigkeit des Speicherns von Checkpoints
-  print_freq: 50 # Logging-Frequenz während des Trainings (Batches)
+  print_freq: 1 # Logging-Frequenz während des Trainings (Batches)
   print_freq_val: 5 # Logging-Frequenz während der Validierung
   train_split_name: "mini_train" # Name des Trainings-Splits
   val_split_name: "mini_val" # Name des Validierungs-Splits
