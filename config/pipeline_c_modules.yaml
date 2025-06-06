@@ -85,6 +85,7 @@ training:
   print_freq_val: 5 # Logging-Frequenz während der Validierung
   train_split_name: "mini_train" # Name des Trainings-Splits
   val_split_name: "mini_val" # Name des Validierungs-Splits
+  sample_idx_for_vis: 15
 
 # 5. Visualisierungs- und Rendering-Standardeinstellungen
 visualization:
