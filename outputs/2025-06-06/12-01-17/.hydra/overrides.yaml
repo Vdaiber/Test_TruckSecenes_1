@@ -1,2 +1,0 @@
-- +training.resume_checkpoint=/app/output/hydra_runs/oft_c_offset_norm_v1/2025-06-06/10-20-03/checkpoints_oft_c_offset_norm_v1/oft_c_best.pth.tar
-- +training.sample_idx_for_vis=60
