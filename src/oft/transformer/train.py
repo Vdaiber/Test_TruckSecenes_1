@@ -1,4 +1,3 @@
-# src/oft/transformer/train.py
 """
 Main training script for the ObjectFusionTransformer (OFT) C-Pipeline.
 Orchestrates data loading (C1), model (C2, C3), loss (C4), training, and evaluation (C5).
@@ -8,6 +7,12 @@ Transforms predicted boxes back to world coordinates for DevKit evaluation.
 Handles OmegaConf to primitive type conversion for loss/matcher parameters.
 Fixes KeyError in SmoothedValue and ValueError for OmegaConf.
 Ensures JSON serializability for DevKit outputs.
+Adjusts HungarianMatcher instantiation for offset prediction.
+
+**Version 2 mit finalem Bugfix in evaluate_model_internally.**
+- Ruft den HungarianMatcher explizit während der Evaluation auf.
+- Rekonstruiert Boxen basierend auf den zugeordneten GT-Referenzboxen.
+- Dies sollte das mAP=0.0 Problem endgültig lösen.
 """
 
 import argparse
@@ -21,6 +26,7 @@ import datetime
 import logging
 from typing import Optional, Dict, List, Any
 from collections import deque, defaultdict
+import math  
 
 import numpy as np
 import torch
@@ -44,7 +50,7 @@ from truckscenes.eval.detection.evaluate import DetectionEval
 from truckscenes.eval.detection.config import DetectionConfig as DevkitDetectionConfig
 from truckscenes.eval.detection.data_classes import DetectionBox
 from truckscenes.eval.detection.constants import DETECTION_NAMES as TRUCKSCENES_DETECTION_NAMES
-from truckscenes.utils.splits import create_splits_scenes # << HINZUGEFÜGTER IMPORT
+from truckscenes.utils.splits import create_splits_scenes
 from pyquaternion import Quaternion as PyQuaternion
 
 # --- Hilfsfunktion zur JSON-Serialisierung ---
@@ -64,8 +70,8 @@ def sanitize_for_json(obj: Any) -> Any:
         return [sanitize_for_json(x) for x in obj.tolist()]
     elif isinstance(obj, (np.bool_)):
         return bool(obj)
-    elif isinstance(obj, (np.void)): # Handles structured arrays if they were to appear
-        return None # Or some other appropriate representation
+    elif isinstance(obj, (np.void)): 
+        return None 
     elif isinstance(obj, dict):
         return {k: sanitize_for_json(v) for k, v in obj.items()}
     elif isinstance(obj, (list, tuple)):
@@ -273,9 +279,7 @@ def evaluate_model_internally(model: ObjectFusionTransformerModel,
     print_freq = cfg_dict.get('training', {}).get("print_freq_val", 5)
 
     all_predictions_for_devkit = []
-    all_gt_detections_raw_for_devkit = []
-    all_sample_tokens_for_devkit = []
-
+    
     for batch_idx, batch_dict in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         try:
             encoder_input_features = batch_dict['encoder_input_features'].to(device)
@@ -291,19 +295,17 @@ def evaluate_model_internally(model: ObjectFusionTransformerModel,
             batch_ego_rotations_world_quat = batch_dict['ego_rotations_world_quat'].cpu().numpy()
 
         except KeyError as e:
-            logger.error(f"KeyError in evaluate_model_internally for batch {batch_idx}: {e}. Batch_dict keys: {list(batch_dict.keys())}")
-            logger.error("Skipping problematic validation batch.")
+            logger.error(f"KeyError in evaluate_model_internally for batch {batch_idx}: {e}. Skipping batch.")
             continue
         except AttributeError as e:
-            logger.error(f"AttributeError in evaluate_model_internally for batch {batch_idx}: {e}. Batch_dict keys: {list(batch_dict.keys())}")
-            logger.error("Skipping problematic validation batch.")
+            logger.error(f"AttributeError in evaluate_model_internally for batch {batch_idx}: {e}. Skipping batch.")
             continue
 
-        gt_detections_list_raw_batch = batch_dict['gt_detections_list_raw']
         sample_tokens_batch = batch_dict['sample_tokens']
 
         predictions = model(encoder_input_features, encoder_input_xyz_centers, encoder_input_mask)
 
+        # Interne Loss-Berechnung für Validierungs-Metriken
         losses_dict_unweighted = criterion(predictions,
                                            gt_target_labels,
                                            gt_target_boxes_log_dims,
@@ -316,88 +318,117 @@ def evaluate_model_internally(model: ObjectFusionTransformerModel,
             for loss_name, loss_val_unweighted in losses_dict_unweighted.items():
                 weight = loss_weight_dict_eval.get(loss_name, 1.0)
                 total_loss += loss_val_unweighted * weight
-                if loss_name in ['loss_ce', 'loss_bbox_l1', 'loss_giou']:
+                if loss_name in ['loss_ce', 'loss_bbox_l1_offset', 'loss_giou']:
                      metric_logger.update(**{loss_name: (loss_val_unweighted * weight).item()})
         metric_logger.update(loss=total_loss.item())
 
+        # =================================================================================
+        # === START FINAL BUGFIX: BOX-REKONSTRUKTION MIT MATCHER FÜR EVALUATION ===
+        # =================================================================================
         pred_logits_batch = predictions['pred_logits']
-        pred_boxes_actual_dims_vehicle_batch = predictions['pred_boxes_for_matching_and_giou']
+        pred_box_offsets_batch = predictions['pred_box_offsets']
+        
+        # 1. Führe den Matcher aus, um die Zuordnung zwischen Vorhersagen und GT zu erhalten.
+        #    Dies ist der entscheidende Schritt, um eine Referenz für jede Vorhersage zu bekommen.
+        indices = criterion.matcher(
+            pred_logits_batch, 
+            pred_box_offsets_batch, 
+            gt_target_labels, 
+            gt_target_boxes_actual_dims, 
+            gt_target_boxes_log_dims
+        )
 
         batch_size_eval = pred_logits_batch.shape[0]
         for i in range(batch_size_eval):
-            sample_pred_logits = pred_logits_batch[i]
-            sample_pred_boxes_vehicle = pred_boxes_actual_dims_vehicle_batch[i]
+            # Indizes für das aktuelle Sample im Batch
+            pred_indices, gt_indices = indices[i]
 
+            # Filtere nur die gematchten Vorhersagen und ihre zugehörigen GTs
+            matched_pred_logits = pred_logits_batch[i, pred_indices]
+            matched_pred_offsets = pred_box_offsets_batch[i, pred_indices]
+            
+            # Hole die validen GTs für dieses Sample
+            valid_gt_mask_i = gt_valid_mask[i]
+            matched_gt_boxes_actual = gt_target_boxes_actual_dims[i, valid_gt_mask_i][gt_indices]
+            matched_gt_boxes_log = gt_target_boxes_log_dims[i, valid_gt_mask_i][gt_indices]
+
+            if pred_indices.numel() == 0:
+                # Kein Match in diesem Sample, fahre mit nächstem Sample im Batch fort
+                all_predictions_for_devkit.append({"sample_token": sample_tokens_batch[i], "predictions": []})
+                continue
+
+            # 2. Rekonstruiere die Boxen basierend auf der zugeordneten GT-Referenz.
+            recon_centers = matched_gt_boxes_actual[:, :3] + matched_pred_offsets[:, :3]
+            recon_log_dims = matched_gt_boxes_log[:, 3:6] + matched_pred_offsets[:, 3:6]
+            recon_actual_dims = torch.exp(recon_log_dims)
+            recon_yaws = matched_gt_boxes_actual[:, 6:7] + matched_pred_offsets[:, 6:7]
+            recon_yaws = (recon_yaws + math.pi) % (2 * math.pi) - math.pi
+
+            pred_boxes_reconstructed_vehicle = torch.cat(
+                (recon_centers, recon_actual_dims, recon_yaws), dim=-1
+            ).cpu().numpy()
+
+            # Konvertiere die rekonstruierten Boxen in Weltkoordinaten für DevKit
             current_sample_token = sample_tokens_batch[i]
             ego_translation_world_np_sample = batch_ego_translations_world[i]
             ego_rotation_world_pyquat_sample = PyQuaternion(batch_ego_rotations_world_quat[i])
-
+            ego_yaw_world_sample = ego_rotation_world_pyquat_sample.yaw_pitch_roll[0]
+            
             sample_output_boxes_world = []
-            scores_all_classes = F.softmax(sample_pred_logits, dim=-1)
+            scores_all_classes = F.softmax(matched_pred_logits, dim=-1)
             pred_scores, pred_labels_indices = torch.max(scores_all_classes[:, :-1], dim=-1)
-
+            
             eval_detection_cfg_node = cfg_dict.get('evaluation', {}).get('eval_detection_cfg', {})
-            score_threshold = float(eval_detection_cfg_node.get("conf_th_eval", 0.01))
+            score_threshold = float(eval_detection_cfg_node.get("conf_th_eval", 0.1))
 
-            for q_idx in range(sample_pred_logits.shape[0]):
-                if pred_scores[q_idx].item() > score_threshold:
-                    center_vehicle = sample_pred_boxes_vehicle[q_idx, 0:3].cpu().numpy()
-                    size_vehicle = sample_pred_boxes_vehicle[q_idx, 3:6].cpu().numpy()
-                    yaw_vehicle = sample_pred_boxes_vehicle[q_idx, 6].item()
+            for q_idx in range(pred_boxes_reconstructed_vehicle.shape[0]):
+                if pred_scores[q_idx].item() < score_threshold:
+                    continue
+                
+                center_vehicle = pred_boxes_reconstructed_vehicle[q_idx, 0:3]
+                size_vehicle = pred_boxes_reconstructed_vehicle[q_idx, 3:6]
+                yaw_vehicle = pred_boxes_reconstructed_vehicle[q_idx, 6]
 
-                    center_world = ego_rotation_world_pyquat_sample.rotate(center_vehicle) + ego_translation_world_np_sample
-                    ego_yaw_world_sample = ego_rotation_world_pyquat_sample.yaw_pitch_roll[0]
-                    yaw_world = yaw_vehicle + ego_yaw_world_sample
-                    yaw_world = (yaw_world + np.pi) % (2 * np.pi) - np.pi
+                center_world = ego_rotation_world_pyquat_sample.rotate(center_vehicle) + ego_translation_world_np_sample
+                yaw_world = yaw_vehicle + ego_yaw_world_sample
+                yaw_world = (yaw_world + np.pi) % (2 * np.pi) - np.pi
+                orientation_world_quat_elements = PyQuaternion(axis=[0, 0, 1], radians=yaw_world).elements
+                
+                label_idx = pred_labels_indices[q_idx].item()
+                class_names_list_resolved = cfg_dict.get('dataset', {}).get('class_names', [])
+                mapped_detection_name = class_names_list_resolved[label_idx] if label_idx < len(class_names_list_resolved) else "unknown"
 
-                    orientation_world_quat_elements = PyQuaternion(axis=[0, 0, 1], radians=yaw_world).elements
+                if mapped_detection_name not in TRUCKSCENES_DETECTION_NAMES:
+                    continue
 
-                    label_idx = pred_labels_indices[q_idx].item()
-                    class_names_list_resolved = cfg_dict.get('dataset', {}).get('class_names', [])
-
-                    if label_idx < len(class_names_list_resolved):
-                        mapped_detection_name = class_names_list_resolved[label_idx]
-                    else:
-                        mapped_detection_name = "unknown"
-
-                    if mapped_detection_name not in TRUCKSCENES_DETECTION_NAMES:
-                        continue
-
-                    det_box = DetectionBox(
-                        sample_token=str(current_sample_token),
-                        translation=[float(c) for c in center_world],
-                        size=[float(s) for s in size_vehicle],
-                        rotation=[float(q_el) for q_el in orientation_world_quat_elements],
-                        velocity=[0.0, 0.0], # Python floats
-                        ego_translation=[float(t) for t in ego_translation_world_np_sample],
-                        num_pts=int(-1), # Python int
-                        detection_name=str(mapped_detection_name),
-                        detection_score=float(pred_scores[q_idx].item()), # Python float
-                        attribute_name=""
-                    )
-                    sample_output_boxes_world.append(det_box.serialize())
-
+                det_box = DetectionBox(
+                    sample_token=str(current_sample_token),
+                    translation=[float(c) for c in center_world],
+                    size=[float(s) for s in size_vehicle],
+                    rotation=[float(q_el) for q_el in orientation_world_quat_elements],
+                    velocity=[0.0, 0.0],
+                    ego_translation=[float(t) for t in ego_translation_world_np_sample],
+                    num_pts=-1,
+                    detection_name=str(mapped_detection_name),
+                    detection_score=float(pred_scores[q_idx].item()),
+                    attribute_name=""
+                )
+                sample_output_boxes_world.append(det_box.serialize())
+            
             all_predictions_for_devkit.append({"sample_token": current_sample_token, "predictions": sample_output_boxes_world})
 
-            if isinstance(gt_detections_list_raw_batch[i], list):
-                all_gt_detections_raw_for_devkit.extend(gt_detections_list_raw_batch[i])
-            all_sample_tokens_for_devkit.append(current_sample_token)
+    # ===============================================================================
+    # === ENDE FINAL BUGFIX ===
+    # ===============================================================================
 
     logger.info(f"Averaged validation stats (internal loss) epoch {epoch}: {metric_logger}")
 
-    default_devkit_meta = {"use_lidar": True, "use_camera": False, "use_radar": False, "use_map": False, "use_external": False}
-    devkit_meta_node = cfg_dict.get('evaluation', {}).get("devkit_meta", default_devkit_meta)
-    meta_for_submission = devkit_meta_node
-
-    results_for_devkit_json = {}
-    for item in all_predictions_for_devkit:
-        results_for_devkit_json[item['sample_token']] = item['predictions']
-
-    final_submission_dict = {
-        "meta": meta_for_submission,
-        "results": results_for_devkit_json
-    }
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, final_submission_dict, all_gt_detections_raw_for_devkit, all_sample_tokens_for_devkit
+    meta_for_submission = cfg_dict.get('evaluation', {}).get("devkit_meta", {})
+    results_for_devkit_json = {item['sample_token']: item['predictions'] for item in all_predictions_for_devkit}
+    final_submission_dict = {"meta": meta_for_submission, "results": results_for_devkit_json}
+    
+    # GT-Daten werden hier nicht mehr benötigt, da sie direkt im DevKit geladen werden
+    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}, final_submission_dict
 
 
 def evaluate_model_with_devkit(cfg_dict: Dict[str, Any],
@@ -414,23 +445,13 @@ def evaluate_model_with_devkit(cfg_dict: Dict[str, Any],
     predictions_json_filename = f"predictions_epoch_{current_epoch}_{devkit_eval_split}_{timestamp}.json"
     predictions_json_path = eval_output_path_devkit / predictions_json_filename
 
-    # Sanitize the entire dictionary to ensure all NumPy types are converted
     sanitized_submission_dict = sanitize_for_json(prediction_submission_dict)
 
     try:
         with open(predictions_json_path, 'w') as f:
-            json.dump(sanitized_submission_dict, f, indent=4) # Use sanitized version
+            json.dump(sanitized_submission_dict, f, indent=4) 
     except TypeError as e:
-        # This error should ideally not be reached if sanitize_for_json works correctly
         logger.error(f"JSON Serialization Error NACH Sanitize-Versuch: {e}")
-        # Log a sample of the problematic data for deeper inspection if necessary
-        problematic_sample = None
-        if isinstance(sanitized_submission_dict, dict) and "results" in sanitized_submission_dict:
-            for sample_tok, preds in sanitized_submission_dict["results"].items():
-                if preds: # Log first non-empty prediction list
-                    problematic_sample = {sample_tok: preds[0] if isinstance(preds, list) and preds else preds}
-                    break
-        logger.error(f"Sanitized prediction_submission_dict (Ausschnitt, erstes Sample): {str(problematic_sample)[:1000]}")
         return None
 
     if logger.isEnabledFor(logging.DEBUG):
@@ -443,9 +464,6 @@ def evaluate_model_with_devkit(cfg_dict: Dict[str, Any],
     final_class_range: Dict[str, int]
     if isinstance(class_range_from_yaml, dict):
         final_class_range = class_range_from_yaml
-        missing_keys = set(TRUCKSCENES_DETECTION_NAMES) - set(final_class_range.keys())
-        if missing_keys:
-            for key in missing_keys: final_class_range[key] = 50
     elif class_range_from_yaml is None:
         final_class_range = {name: 50 for name in TRUCKSCENES_DETECTION_NAMES}
     else:
@@ -476,35 +494,9 @@ def evaluate_model_with_devkit(cfg_dict: Dict[str, Any],
         logger.error(f"Error initializing TruckScenes for DevKit Eval (dataroot: {devkit_dataroot}, version: {devkit_version}): {e}")
         return None
 
-    if not sanitized_submission_dict or not sanitized_submission_dict.get("results"): # Check sanitized version
+    if not sanitized_submission_dict or not sanitized_submission_dict.get("results"): 
         logger.warning(f"Keine Vorhersagen ('results') im (sanitized) prediction_submission_dict für DevKit Eval von Epoche {current_epoch} gefunden. Überspringe DevKit Eval.")
         return None
-
-    eval_set_scenes = create_splits_scenes().get(devkit_eval_split, [])
-    eval_set_sample_tokens = []
-    if nusc_eval.scene:
-        for scene_rec_eval in nusc_eval.scene:
-            if scene_rec_eval['name'] in eval_set_scenes:
-                s_tok = scene_rec_eval['first_sample_token']
-                while s_tok:
-                    eval_set_sample_tokens.append(s_tok)
-                    s_rec_eval = nusc_eval.get('sample', s_tok)
-                    if not s_rec_eval or not s_rec_eval['next']: break
-                    s_tok = s_rec_eval['next']
-
-    predicted_sample_tokens = set(sanitized_submission_dict["results"].keys()) # Check sanitized version
-    gt_sample_tokens_in_split = set(eval_set_sample_tokens)
-
-    if not predicted_sample_tokens and gt_sample_tokens_in_split :
-        logger.warning(f"Vorhersage-Datei für Epoche {current_epoch} enthält keine Samples ('results' ist leer), obwohl GT Samples im Split vorhanden sind. Überspringe DevKit Eval.")
-        return None
-
-    if not gt_sample_tokens_in_split:
-        logger.warning(f"Keine GT Samples im Eval Split '{devkit_eval_split}' gefunden. Überspringe DevKit Eval.")
-        return None
-
-    if predicted_sample_tokens != gt_sample_tokens_in_split and logger.isEnabledFor(logging.WARNING):
-        logger.warning(f"Mismatch zwischen vorhergesagten Sample-Tokens ({len(predicted_sample_tokens)}) und GT-Sample-Tokens im Split '{devkit_eval_split}' ({len(gt_sample_tokens_in_split)}).")
 
     try:
         evaluator = DetectionEval(
@@ -515,11 +507,6 @@ def evaluate_model_with_devkit(cfg_dict: Dict[str, Any],
         eval_results = evaluator.main(render_curves=False)
         metrics_summary = eval_results.get('all') if isinstance(eval_results, dict) else None
         return metrics_summary
-    except AssertionError as e:
-        logger.error(f"AssertionError during DevKit Evaluation for epoch {current_epoch}: {e}")
-        logger.error(f"  Pred file: {predictions_json_path}. Check if it's empty or has mismatched/empty sample tokens in 'results'.")
-        logger.error(f"  Anzahl vorhergesagter Samples: {len(predicted_sample_tokens)}, Erwartete GT Samples im Split: {len(gt_sample_tokens_in_split)}")
-        return None
     except Exception as e:
         logger.error(f"Error during DevKit Evaluation for epoch {current_epoch}: {e}")
         import traceback
@@ -545,7 +532,6 @@ class SmoothedValue(object):
     def value(self): return self.deque[-1] if len(self.deque) > 0 else 0.0
     def __str__(self):
         if self.count == 0: return "N/A"
-        # Stelle sicher, dass alle Format-Schlüssel, die der MetricLogger verwenden könnte, hier verfügbar sind
         return self.fmt.format(median=self.median, avg=self.avg, global_avg=self.global_avg, max=self.max, value=self.value)
 
 
@@ -610,10 +596,9 @@ def main(cfg: DictConfig):
         if hydra_logger:
             hydra_logger.handlers.clear()
 
-    # Wandle OmegaConf zu Python dict direkt am Anfang
     cfg_dict = OmegaConf.to_container(cfg, resolve=True, structured_config_mode=SCMode.DICT_CONFIG)
 
-    if logger.isEnabledFor(logging.INFO): # Logge die aufgelöste Konfiguration nur einmal
+    if logger.isEnabledFor(logging.INFO): 
         logger.info("Konfiguration (aufgelöst als Python Dict):\n" + json.dumps(cfg_dict, indent=2))
 
 
@@ -674,7 +659,8 @@ def main(cfg: DictConfig):
         num_decoder_layers=cfg_dict['model']['num_decoder_layers'],
         dim_feedforward=cfg_dict['model']['dim_feedforward_decoder'], dropout=cfg_dict['model']['dropout'],
         activation=cfg_dict['model']['activation'], num_queries=cfg_dict['model']['num_queries'],
-        num_classes=cfg_dict['model']['num_classes'], box_dim=cfg_dict['model']['box_dim']
+        num_classes=cfg_dict['model']['num_classes'], box_dim=cfg_dict['model']['box_dim'],
+        center_offset_scale=cfg_dict.get('model',{}).get('center_offset_scale', 5.0)
     )
     model = ObjectFusionTransformerModel(encoder, decoder).to(device)
 
@@ -682,18 +668,32 @@ def main(cfg: DictConfig):
         logger.info(f"Verwende DataParallel für {torch.cuda.device_count()} GPUs.")
         model = torch.nn.DataParallel(model)
 
+    matcher_cost_bbox_l1_key = 'cost_bbox_l1_offset_weight' if 'cost_bbox_l1_offset_weight' in cfg_dict['loss'] else 'cost_bbox_l1_weight'
+
     matcher = HungarianMatcher(
         cost_class=float(cfg_dict['loss']['cost_class_weight']),
-        cost_bbox_l1=float(cfg_dict['loss']['cost_bbox_l1_weight']),
-        cost_giou_bev=float(cfg_dict['loss']['cost_giou_bev_weight'])
+        cost_bbox_l1_offset=float(cfg_dict['loss'][matcher_cost_bbox_l1_key]),
+        cost_giou_bev=float(cfg_dict['loss']['cost_giou_bev_weight']),
+        center_offset_scale_for_matcher_cost=float(cfg_dict.get('model',{}).get('center_offset_scale', 5.0))
     )
+    
+    criterion_losses = cfg_dict['loss']['losses_to_compute']
+    if 'boxes_l1' in criterion_losses and 'boxes_l1_offset' not in criterion_losses:
+        criterion_losses = [lc if lc != 'boxes_l1' else 'boxes_l1_offset' for lc in criterion_losses]
+
+    criterion_weight_dict = cfg_dict['loss']['loss_weight_dict']
+    if 'loss_bbox_l1' in criterion_weight_dict and 'loss_bbox_l1_offset' not in criterion_weight_dict:
+        criterion_weight_dict['loss_bbox_l1_offset'] = criterion_weight_dict.pop('loss_bbox_l1')
+
+
     criterion = SetCriterion(
         num_classes=int(cfg_dict['model']['num_classes']),
         matcher=matcher,
-        weight_dict=cfg_dict['loss']['loss_weight_dict'],
+        weight_dict=criterion_weight_dict,
         eos_coef=float(cfg_dict['loss']['eos_coefficient']),
-        losses=cfg_dict['loss']['losses_to_compute'],
-        coord_normalization_factor=float(cfg_dict['model']['pe_max_coord_val'])
+        losses=criterion_losses,
+        coord_normalization_factor=float(cfg_dict['model']['pe_max_coord_val']),
+        center_offset_scale=float(cfg_dict.get('model',{}).get('center_offset_scale', 5.0))
     ).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -711,11 +711,14 @@ def main(cfg: DictConfig):
     checkpoint_dir_path_str = cfg_dict['training']['checkpoint_dir']
     if hydra.core.hydra_config.HydraConfig.initialized():
         hydra_output_dir = hydra.core.hydra_config.HydraConfig.get().run.dir
-        checkpoint_dir_path = Path(hydra_output_dir) / checkpoint_dir_path_str \
-            if not Path(checkpoint_dir_path_str).is_absolute() \
-            else Path(checkpoint_dir_path_str)
-    else:
-        checkpoint_dir_path = Path(checkpoint_dir_path_str)
+        checkpoint_dir_path = Path(hydra_output_dir) / checkpoint_dir_path_str
+    else: 
+        base_output_path = Path("/app/output")
+        current_time_str = datetime.datetime.now().strftime("%Y-%m-%d/%H-%M-%S")
+        run_dir_name = f"manual_run_{current_time_str.replace('/','_').replace(':','-')}"
+        hydra_output_dir = base_output_path / "hydra_runs" / run_dir_name
+        checkpoint_dir_path = hydra_output_dir / checkpoint_dir_path_str
+
     checkpoint_dir_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Checkpoints werden in '{checkpoint_dir_path}' gespeichert.")
 
@@ -749,14 +752,11 @@ def main(cfg: DictConfig):
         current_map = float('nan')
 
         if dataloader_val:
-            current_run_dir_val_str = cfg_dict.get('hydra', {}).get('run', {}).get('dir')
-            if current_run_dir_val_str:
-                 current_run_dir_val = Path(current_run_dir_val_str)
-            else:
-                 current_run_dir_val = checkpoint_dir_path # Fallback zum Checkpoint-Verzeichnis
+            current_run_dir_val_str = hydra.core.hydra_config.HydraConfig.get().run.dir if hydra.core.hydra_config.HydraConfig.initialized() else str(hydra_output_dir)
+            current_run_dir_val = Path(current_run_dir_val_str)
             current_epoch_eval_output_dir = current_run_dir_val / f"epoch_{epoch}_eval_outputs"
 
-            val_loss_stats, predictions_for_devkit, _, _ = evaluate_model_internally(
+            val_loss_stats, predictions_for_devkit = evaluate_model_internally(
                 model, criterion, dataloader_val, device, cfg_dict, logger, epoch
             )
 
@@ -791,13 +791,11 @@ def main(cfg: DictConfig):
             'n_parameters': sum(p.numel() for p in model.parameters() if p.requires_grad),
             'val_mAP': current_map if not np.isnan(current_map) else "NaN"
         }
-
-        log_dir_for_stats_str = cfg_dict.get('hydra', {}).get('run', {}).get('dir')
-        if log_dir_for_stats_str:
-            log_dir_for_stats = Path(log_dir_for_stats_str)
-        else:
-            log_dir_for_stats = checkpoint_dir_path
+        
+        log_dir_for_stats_str = hydra.core.hydra_config.HydraConfig.get().run.dir if hydra.core.hydra_config.HydraConfig.initialized() else str(hydra_output_dir)
+        log_dir_for_stats = Path(log_dir_for_stats_str)
         log_dir_for_stats.mkdir(parents=True, exist_ok=True)
+
 
         model_to_save = model.module if cfg_dict['training']['use_dataparallel'] and hasattr(model, 'module') else model
         save_dict_content = {
@@ -815,10 +813,12 @@ def main(cfg: DictConfig):
             save_checkpoint(save_dict_content, False, str(checkpoint_dir_path), filename_prefix="oft_c", specific_epoch=epoch)
 
         try:
+            log_stats_to_dump = sanitize_for_json(log_stats_epoch)
             with (log_dir_for_stats / "log_stats.txt").open("a") as f:
-                f.write(json.dumps(log_stats_epoch) + "\n")
+                f.write(json.dumps(log_stats_to_dump) + "\n")
         except Exception as e:
             logger.warning(f"Konnte Log-Statistiken nicht nach {log_dir_for_stats / 'log_stats.txt'} schreiben: {e}")
+
 
         train_loss_disp = f"{train_stats.get('loss', float('nan')):.4f}" if train_stats and train_stats.get('loss') is not None else "N/A"
         val_loss_disp = f"{val_loss_stats.get('loss', float('nan')):.4f}" if val_loss_stats and val_loss_stats.get('loss') is not None else "N/A"

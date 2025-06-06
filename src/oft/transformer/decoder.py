@@ -1,19 +1,20 @@
 # src/oft/transformer/decoder.py
 import torch
 import torch.nn as nn
-import math # Hinzugefügt für math.pi
+import math
 from typing import Optional, Dict, List
 
 # Importe für das Laden der Konfiguration im Test-Block
 import os
-from oft.utils.config import load_config # Stellen Sie sicher, dass dieser Importpfad korrekt ist
-import numpy as np # Für den Testblock
+# from oft.utils.config import load_config # Nur für __main__
+from omegaconf import OmegaConf # Nur für __main__
+import numpy as np # Nur für __main__
 
 class ObjectFusionTransformerDecoder(nn.Module):
     """
     Transformer-Decoder zur Vorhersage einer Menge von Objekten basierend auf
     Encoder-Memory und lernbaren Objekt-Queries.
-    Gibt Boxen mit tatsächlichen Dimensionen und Boxen mit log-Dimensionen für den Verlust zurück.
+    Sagt Box-Parameter als Offsets vorher.
     """
     def __init__(self,
                  d_model: int = 256,
@@ -24,13 +25,13 @@ class ObjectFusionTransformerDecoder(nn.Module):
                  activation: str = "relu",
                  num_queries: int = 100,
                  num_classes: int = 10,
-                 box_dim: int = 7 # Erwartet immer 7: cx, cy, cz, w, l, h, yaw (bzw. log(w),log(l),log(h) vom MLP)
+                 box_dim: int = 7, # Sollte 7 sein: cx, cy, cz, log_w, log_l, log_h, yaw
+                 center_offset_scale: float = 5.0 # Neuer Parameter für die Skalierung der Zentrum-Offsets
                 ):
         super().__init__()
         self.d_model = d_model
         self.num_queries = num_queries
-        # box_dim ist die Dimension des Outputs des bbox_head_mlp,
-        # der cx,cy,cz, log(w),log(l),log(h), yaw_raw vorhersagt.
+        self.center_offset_scale = center_offset_scale
 
         self.object_queries_embed = nn.Embedding(num_queries, d_model)
         
@@ -50,8 +51,9 @@ class ObjectFusionTransformerDecoder(nn.Module):
 
         self.class_head = nn.Linear(d_model, num_classes + 1) # +1 für "kein Objekt"
         
-        # Bbox_head_mlp: Sagt cx, cy, cz, log(w), log(l), log(h), raw_yaw vorher
-        self.bbox_head_mlp = nn.Sequential(
+        # Bbox_head_mlp: Sagt Offsets vorher
+        # (Δcx_raw, Δcy_raw, Δcz_raw, Δlog_w, Δlog_l, Δlog_h, Δyaw_raw)
+        self.bbox_offset_head_mlp = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
             nn.Linear(d_model // 2, d_model // 4),
@@ -61,6 +63,9 @@ class ObjectFusionTransformerDecoder(nn.Module):
 
     def forward(self,
                 memory: torch.Tensor, 
+                # Referenz-Boxen werden nicht mehr direkt an den Decoder übergeben,
+                # da im GT->GT Fall das Ziel-Offset Null ist und die Rekonstruktion im Loss-Modul erfolgt.
+                # Später, mit echten Sensor-Inputs, könnte die Referenz hier oder im Loss explizit benötigt werden.
                 memory_key_padding_mask: Optional[torch.Tensor] = None
                ) -> Dict[str, torch.Tensor]:
         """
@@ -71,123 +76,126 @@ class ObjectFusionTransformerDecoder(nn.Module):
         Returns:
             Ein Dictionary mit:
             - "pred_logits": Klassifikations-Logits (B, NumQueries, NumClasses + 1).
-            - "pred_boxes_for_loss": Box-Parameter für den Verlust
-                                     (B, NumQueries, 7) -> (cx,cy,cz, log(w),log(l),log(h), yaw_proc).
-            - "pred_boxes_for_matching_and_giou": Box-Parameter mit realen Dimensionen
-                                     (B, NumQueries, 7) -> (cx,cy,cz, w,l,h, yaw_proc).
+            - "pred_box_offsets": Vorhergesagte Box-Offsets 
+                                   (B, NumQueries, 7) -> (Δcx_scaled, Δcy_scaled, Δcz_scaled, 
+                                                          Δlog_w, Δlog_l, Δlog_h, Δyaw_proc).
+                                   Zentrum-Offsets sind mit tanh behandelt und skaliert.
         """
         batch_size = memory.shape[0]
-        # tgt sind die lernbaren Objekt-Queries
-        tgt = self.object_queries_embed.weight.unsqueeze(0).repeat(batch_size, 1, 1) # (B, NumQueries, d_model)
+        tgt = self.object_queries_embed.weight.unsqueeze(0).repeat(batch_size, 1, 1)
 
-        # Decoder-Durchlauf
         decoder_output = self.transformer_decoder_stack(
             tgt=tgt,
             memory=memory,
             tgt_key_padding_mask=None, 
             memory_key_padding_mask=memory_key_padding_mask
-        ) # (B, NumQueries, d_model)
+        )
          
-        # Klassifikations-Vorhersagen
-        pred_logits = self.class_head(decoder_output) # (B, NumQueries, NumClasses + 1)
+        pred_logits = self.class_head(decoder_output)
          
-        # Rohe Bounding-Box-Vorhersagen vom MLP
-        # Erwartet: (cx, cy, cz, log(w), log(l), log(h), raw_yaw)
-        raw_pred_box_params = self.bbox_head_mlp(decoder_output) # (B, NumQueries, 7)
+        # Rohe Offset-Vorhersagen vom MLP
+        raw_pred_box_offsets = self.bbox_offset_head_mlp(decoder_output) # (B, NumQueries, 7)
          
-        # Extrahieren und verarbeiten der Parameter
-        pred_cxcycz = raw_pred_box_params[..., :3]  # Absolute Fahrzeugkoordinaten-Zentren
-        pred_log_wlh = raw_pred_box_params[..., 3:6] # Logarithmierte Dimensionen
+        # Zentrum-Offsets mit tanh und Skalierung
+        # Diese Offsets sind relativ zu einer impliziten Referenz (z.B. der Query-Position oder (0,0,0))
+        # und sollen klein sein.
+        pred_center_offsets_normalized = torch.tanh(raw_pred_box_offsets[..., :3]) 
+        pred_center_offsets_scaled = pred_center_offsets_normalized * self.center_offset_scale
         
-        # Yaw verarbeiten (tanh skaliert auf [-1, 1], dann * pi auf [-pi, pi])
-        pred_yaw_proc = torch.tanh(raw_pred_box_params[..., 6:7]) * math.pi # (B, NumQueries, 1)
+        # Log-Dimensions-Offsets (direkt vom MLP)
+        pred_log_dim_offsets = raw_pred_box_offsets[..., 3:6]
         
-        # Boxen für den Verlust (mit log-Dimensionen)
-        pred_boxes_for_loss = torch.cat((pred_cxcycz, pred_log_wlh, pred_yaw_proc), dim=-1)
+        # Yaw-Offset (verarbeitet, relativ zu einer Referenz-Yaw von 0)
+        pred_yaw_offset_proc = torch.tanh(raw_pred_box_offsets[..., 6:7]) * math.pi
         
-        # Boxen mit realen Dimensionen (für Matching, GIoU, Inferenz)
-        pred_wlh_actual = torch.exp(pred_log_wlh) # Exponentieren der log-Dimensionen
-        pred_boxes_for_matching_and_giou = torch.cat((pred_cxcycz, pred_wlh_actual, pred_yaw_proc), dim=-1)
+        # Kombinierte Offsets für den Verlust
+        pred_box_offsets = torch.cat((pred_center_offsets_scaled, 
+                                      pred_log_dim_offsets, 
+                                      pred_yaw_offset_proc), dim=-1)
          
         return {
             "pred_logits": pred_logits,
-            "pred_boxes_for_loss": pred_boxes_for_loss,
-            "pred_boxes_for_matching_and_giou": pred_boxes_for_matching_and_giou
+            "pred_box_offsets": pred_box_offsets,
+            # Die Rekonstruktion zu absoluten Boxen (für GIoU/Matching) wird jetzt im Loss-Modul gemacht,
+            # da dort die Referenz (GT-Boxen) verfügbar ist.
         }
 
 if __name__ == '__main__':
-    print("Running ObjectFusionTransformerDecoder example with config-loaded parameters (Log-Dims)...")
+    print("Running ObjectFusionTransformerDecoder example with Offset Prediction...")
+    # Lade Konfiguration für Testparameter
+    # Stelle sicher, dass dieser Pfad relativ zum Ausführungsort des Skripts ist oder absolut.
+    # Für Tests direkt aus dem 'transformer' Ordner wäre der Pfad: '../../config/pipeline_c_modules.yaml'
+    config_file_path_dec_main = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'pipeline_c_modules.yaml')
 
-    config_file_path_dec = "config/pipeline_c_modules.yaml"
-    project_root_dec = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
-    config_file_path_dec_abs = os.path.join(project_root_dec, config_file_path_dec)
-
-    if not os.path.exists(config_file_path_dec_abs):
-        print(f"WARNUNG: Config file not found at {config_file_path_dec_abs}. Using default test parameters.")
-        model_cfg_dec = {}
+    if not os.path.exists(config_file_path_dec_main):
+        print(f"WARNUNG: Config file not found at {config_file_path_dec_main}. Using default test parameters.")
+        model_cfg_dec_main = { # Minimal-Config für den Test
+            'd_model': 256, 'nhead': 8, 'num_decoder_layers': 1, 
+            'dim_feedforward_decoder': 512, 'dropout': 0.1, 'activation': 'relu',
+            'num_queries': 10, 'num_classes': 12, 'box_dim': 7,
+            'center_offset_scale': 5.0 
+        }
     else:
-        try:
-            full_pipeline_config_dec = load_config(config_file_path_dec_abs)
-            print(f"Konfiguration für Decoder-Test geladen von: {config_file_path_dec_abs}")
-            model_cfg_dec = OmegaConf.to_container(full_pipeline_config_dec.get('model', {}), resolve=True)
-        except Exception as e:
-            print(f"Fehler beim Laden der Konfiguration für Decoder-Test: {e}. Verwende Standard-Fallback-Parameter.")
-            model_cfg_dec = {}
+        from oft.utils.config import load_config # Importiere hier, da es nur für __main__ benötigt wird
+        full_pipeline_config_dec_main = load_config(config_file_path_dec_main)
+        model_cfg_dec_main = OmegaConf.to_container(full_pipeline_config_dec_main.get('model', {}), resolve=True)
+        # Füge center_offset_scale hinzu, falls nicht in der Config (für Abwärtskompatibilität)
+        if 'center_offset_scale' not in model_cfg_dec_main:
+            model_cfg_dec_main['center_offset_scale'] = 5.0 
+        print(f"Konfiguration für Decoder-Test geladen von: {config_file_path_dec_main}")
 
-    d_model_cfg = model_cfg_dec.get('d_model', 256)
-    n_heads_cfg = model_cfg_dec.get('nhead', 8)
-    num_dec_layers_cfg = model_cfg_dec.get('num_decoder_layers', 3)
-    dim_ff_decoder_cfg = model_cfg_dec.get('dim_feedforward_decoder', d_model_cfg * 4)
-    dropout_cfg = model_cfg_dec.get('dropout', 0.1)
-    activation_cfg = model_cfg_dec.get('activation', 'relu')
-    num_queries_cfg = model_cfg_dec.get('num_queries', 100)
-    num_classes_cfg = model_cfg_dec.get('num_classes', 12) # Angepasst an deine Config
-    box_dim_cfg = model_cfg_dec.get('box_dim', 7)
+
+    d_model_cfg = model_cfg_dec_main.get('d_model')
+    n_heads_cfg = model_cfg_dec_main.get('nhead')
+    num_dec_layers_cfg = model_cfg_dec_main.get('num_decoder_layers')
+    dim_ff_decoder_cfg = model_cfg_dec_main.get('dim_feedforward_decoder')
+    dropout_cfg = model_cfg_dec_main.get('dropout')
+    activation_cfg = model_cfg_dec_main.get('activation')
+    num_queries_cfg = model_cfg_dec_main.get('num_queries')
+    num_classes_cfg = model_cfg_dec_main.get('num_classes')
+    box_dim_cfg = model_cfg_dec_main.get('box_dim')
+    center_offset_scale_cfg = model_cfg_dec_main.get('center_offset_scale')
      
     batch_s = 2
     num_enc_objects = 50 
+    device_test = torch.device("cpu")
      
-    dummy_encoder_memory = torch.rand(batch_s, num_enc_objects, d_model_cfg)
-    dummy_memory_padding_mask = torch.zeros(batch_s, num_enc_objects, dtype=torch.bool)
-    if num_enc_objects > 10:
-        dummy_memory_padding_mask[:, -10:] = True
+    dummy_encoder_memory = torch.rand(batch_s, num_enc_objects, d_model_cfg, device=device_test)
+    dummy_memory_padding_mask = torch.zeros(batch_s, num_enc_objects, dtype=torch.bool, device=device_test)
 
     print(f"\nVerwendete Decoder-Parameter:")
     print(f"  d_model: {d_model_cfg}, nhead: {n_heads_cfg}, num_decoder_layers: {num_dec_layers_cfg}")
     print(f"  dim_feedforward: {dim_ff_decoder_cfg}, dropout: {dropout_cfg}, activation: {activation_cfg}")
-    print(f"  num_queries: {num_queries_cfg}, num_classes (ohne BG): {num_classes_cfg-1}, box_dim_mlp_output: {box_dim_cfg}")
+    print(f"  num_queries: {num_queries_cfg}, num_classes (ohne BG): {num_classes_cfg}")
+    print(f"  box_dim (für MLP-Output): {box_dim_cfg}, center_offset_scale: {center_offset_scale_cfg}")
 
-    decoder = ObjectFusionTransformerDecoder(
+    decoder_instance = ObjectFusionTransformerDecoder(
         d_model=d_model_cfg, nhead=n_heads_cfg, num_decoder_layers=num_dec_layers_cfg, 
         dim_feedforward=dim_ff_decoder_cfg, dropout=dropout_cfg, activation=activation_cfg,
-        num_queries=num_queries_cfg, num_classes=num_classes_cfg, box_dim=box_dim_cfg
-    )
-    decoder.eval()
+        num_queries=num_queries_cfg, num_classes=num_classes_cfg, box_dim=box_dim_cfg,
+        center_offset_scale=center_offset_scale_cfg
+    ).to(device_test)
+    decoder_instance.eval()
 
     with torch.no_grad():
-        predictions = decoder(
+        predictions = decoder_instance(
             memory=dummy_encoder_memory,
             memory_key_padding_mask=dummy_memory_padding_mask
         )
 
     print(f"\nDecoder Output Dictionary Keys: {list(predictions.keys())}")
     print(f"  pred_logits shape: {predictions['pred_logits'].shape}") 
-    print(f"  pred_boxes_for_loss shape: {predictions['pred_boxes_for_loss'].shape}")   
-    print(f"  pred_boxes_for_matching_and_giou shape: {predictions['pred_boxes_for_matching_and_giou'].shape}")   
-
+    print(f"  pred_box_offsets shape: {predictions['pred_box_offsets'].shape}")   
+    
     assert predictions['pred_logits'].shape == (batch_s, num_queries_cfg, num_classes_cfg + 1)
-    assert predictions['pred_boxes_for_loss'].shape == (batch_s, num_queries_cfg, box_dim_cfg)
-    assert predictions['pred_boxes_for_matching_and_giou'].shape == (batch_s, num_queries_cfg, box_dim_cfg)
+    assert predictions['pred_box_offsets'].shape == (batch_s, num_queries_cfg, box_dim_cfg)
      
     print(f"\nBeispiel Output für erste Query, erstes Sample:")
-    pred_loss_box_sample = predictions['pred_boxes_for_loss'][0, 0, :].cpu().numpy()
-    pred_match_box_sample = predictions['pred_boxes_for_matching_and_giou'][0, 0, :].cpu().numpy()
-
+    pred_offsets_sample = predictions['pred_box_offsets'][0, 0, :].cpu().numpy()
     print(f"  Logits (erste 5 Werte): {predictions['pred_logits'][0, 0, :5].tolist()}")
-    print(f"  Box für Loss (cx,cy,cz, log(w),log(l),log(h), yaw): {np.round(pred_loss_box_sample, 3)}")
-    print(f"  Box für Matching/GIoU (cx,cy,cz, w,l,h, yaw): {np.round(pred_match_box_sample, 3)}")
-    print(f"    cx,cy,cz (gleich): {np.round(pred_match_box_sample[:3], 3)}")
-    print(f"    w,l,h (exponentiert): {np.round(pred_match_box_sample[3:6], 3)}")
-    print(f"    yaw (gleich, nach tanh*pi): {pred_match_box_sample[6]:.3f} rad")
+    print(f"  Box Offsets (Δcx_s, Δcy_s, Δcz_s, Δlog_w, Δlog_l, Δlog_h, Δyaw_proc): {np.round(pred_offsets_sample, 3)}")
+    print(f"    Δcx,y,z (skaliert): {np.round(pred_offsets_sample[:3], 3)}")
+    print(f"    Δlog_w,l,h: {np.round(pred_offsets_sample[3:6], 3)}")
+    print(f"    Δyaw_proc (nach tanh*pi): {pred_offsets_sample[6]:.3f} rad")
      
-    print("\nObjectFusionTransformerDecoder example run successful (mit Log-Dimensionen).")
+    print("\nObjectFusionTransformerDecoder (Offset Prediction) example run successful.")

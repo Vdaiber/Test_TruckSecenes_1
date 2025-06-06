@@ -26,7 +26,8 @@ model:
   d_model: 300 # Interne Feature-Dimension des Transformer-Modells (Encoder und Decoder)
   nhead: 2 # Anzahl der Attention-Heads in den Multi-Head-Attention-Layern. Muss ein Teiler von d_model sein
   dropout: 0.1 # Dropout-Rate, die in verschiedenen Teilen des Modells (Attention, FFNs) verwendet wird
-  activation: "relu" # Aktivierungsfunktion in den Feed-Forward-Netzwerken (FFN) der Transformer-Layer
+  activation: "relu"
+  center_offset_scale: 5.0 # Oder ein anderer Startwert, den du für sinnvoll hältst (z.B. 5 oder 10 Meter) # Aktivierungsfunktion in den Feed-Forward-Netzwerken (FFN) der Transformer-Layer
 
   # Encoder-spezifische Parameter
   num_input_features: 10 # Dimensionalität des Feature-Vektors für jedes Eingabeobjekt an den Encoder
@@ -45,22 +46,18 @@ model:
 
 # 3. Verlustfunktion (C4: SetCriterion & HungarianMatcher)
 loss:
-  # Kosten-Gewichte für den Hungarian Matcher (Zuordnung von Vorhersagen zu Ground Truth)
-  cost_class_weight: 2.0 # Gewicht für die Klassifikationskosten
-  cost_bbox_l1_weight: 5.0 # Gewicht für die L1-Distanzkosten der Bounding-Box-Parameter
-  cost_giou_bev_weight: 2.0 # Gewicht für die GIoU-Kosten (im BEV) der Bounding Boxes
-
-  # Parameter für die SetCriterion Verlustberechnung
-  eos_coefficient: 0.1 # Gewicht für die "kein Objekt" Klasse im Klassifikationsverlust
-  losses_to_compute: # Liste der einzelnen Verlustkomponenten
-    - labels # Klassifikationsverlust
-    - boxes_l1 # L1-Verlust für Bounding Boxes
-    - giou_bev # GIoU-Verlust im BEV
-
+  cost_class_weight: 2.0
+  cost_bbox_l1_offset_weight: 5.0
+  cost_giou_bev_weight: 2.0
+  eos_coefficient: 0.1
+  losses_to_compute:
+    - labels
+    - boxes_l1_offset
+    - giou_bev
   loss_weight_dict:
-    loss_ce: 1.0 # Gewicht für den Cross-Entropy Verlust
-    loss_bbox_l1: 5.0 # Gewicht für den L1-Verlust der Bounding Boxes
-    loss_giou: 2.0 # Gewicht für den GIoU-Verlust
+    loss_ce: 1.0
+    loss_bbox_l1_offset: 5.0
+    loss_giou: 2.0
 
 # 4. Trainingseinstellungen (für C5: Trainingsloop)
 training:

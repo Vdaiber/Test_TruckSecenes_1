@@ -1,297 +1,302 @@
-# src/oft/transformer/visualize_transformer_fusion.py
+"""
+Visualisierungsskript für den ObjectFusionTransformer (OFT).
+- Lädt ein trainiertes Modell und eine Konfiguration.
+- Wählt ein Sample aus einem Datensatz-Split aus.
+- Führt eine Inferenz durch.
+- Rekonstruiert die vorhergesagten Boxen aus den Offsets unter Verwendung des HungarianMatchers 
+  und der GT-Referenzboxen (analog zur korrekten Evaluation).
+- Zeichnet Ground-Truth (grün) und vorhergesagte (blau) Boxen auf das entsprechende Kamerabild.
+"""
 import torch
 import torch.nn.functional as F
 import numpy as np
 import cv2
 import argparse
 import os
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+import hydra
+from omegaconf import DictConfig, OmegaConf, SCMode
+
 # Importe aus unserem Projekt
-from oft.utils.config import load_config
-from oft.data.transformer_gt_dataset import ObjectFusionGTDataset # Für GT-Daten und Sample-Auswahl
-from oft.data.transformer_gt_collate import object_fusion_gt_collate_fn # Um Modell-Input zu erzeugen
+from oft.data.transformer_gt_dataset import ObjectFusionGTDataset
+from oft.data.transformer_gt_collate import object_fusion_gt_collate_fn
 from oft.transformer.encoder import ObjectEncoder
 from oft.transformer.decoder import ObjectFusionTransformerDecoder
-from oft.transformer.train import ObjectFusionTransformerModel, load_checkpoint # Für Modell und Checkpoint-Laden
+from oft.transformer.loss import SetCriterion, HungarianMatcher
+from oft.transformer.train import ObjectFusionTransformerModel, load_checkpoint
 
-# Importe aus dem TruckScenes DevKit
+# Importe aus dem TruckScenes DevKit und Hilfsfunktionen
 from truckscenes import TruckScenes
-from truckscenes.utils.data_classes import Box as DevkitBox # Für die Darstellung
-# from truckscenes.utils.geometry_utils import BoxVisibility # Nicht direkt hier benötigt, aber gut zu wissen
+from truckscenes.utils.data_classes import Box as DevkitBox
 from pyquaternion import Quaternion as PyQuaternion
+from oft.utils.sensor_utils import get_camera_intrinsic, get_sensor_extrinsic, draw_boxes_on_image
 
-# Importiere die passende Visualisierungsfunktion (die Weltkoordinaten-Boxen nimmt)
-from oft.utils.sensor_utils import get_camera_intrinsic, get_sensor_extrinsic, draw_boxes_on_image, CLASS_COLORS
+# Globale Farbdefinition für die Visualisierung
+CLASS_COLORS_VIS = {
+    'car': (0, 0, 255), 'truck': (0, 0, 128), 'bus': (0, 128, 128),
+    'trailer': (0, 255, 128), 'other_vehicle': (128, 128, 0),
+    'pedestrian': (255, 0, 0), 'motorcycle': (255, 0, 255), 'bicycle': (255, 255, 0),
+    'traffic_cone': (255, 128, 0), 'barrier': (128, 0, 0),
+    'animal': (128, 64, 0), 'traffic_sign': (0, 128, 0),
+    # Spezielle Farben für unsere Visualisierung
+    '__PRED__': (50, 150, 255),  # Hellblau für Vorhersagen
+    '__GT__': (50, 255, 150),    # Hellgrün für Ground Truth
+}
 
-def convert_predictions_to_devkit_boxes(
-    pred_logits: torch.Tensor, # (NumQueries, NumClasses + 1)
-    pred_boxes_7d: torch.Tensor, # (NumQueries, BoxDim)
-    class_names: List[str],
-    score_threshold: float = 0.3,
-    sample_token: str = "default_token" 
-) -> List[DevkitBox]:
-    """
-    Konvertiert die rohen Modellvorhersagen (Logits und Boxen) eines einzelnen Samples
-    in eine Liste von truckscenes.utils.data_classes.Box Objekten für die Visualisierung.
-    Filtert nach Konfidenz-Score.
-    """
-    if pred_logits.numel() == 0 or pred_boxes_7d.numel() == 0:
-        return []
+def get_color(class_name: str, mode: str = 'pred') -> tuple:
+    """Holt eine Farbe für eine Klasse, mit Fallback-Farben."""
+    if mode.lower() == 'gt':
+        return CLASS_COLORS_VIS.get('__GT__')
+    return CLASS_COLORS_VIS.get(class_name, CLASS_COLORS_VIS.get('__PRED__'))
 
-    pred_scores_softmax = F.softmax(pred_logits, dim=-1) 
+def main(cfg: DictConfig):
+    logger = logging.getLogger("visualize_logger")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        stream_handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+
+    cfg_dict = OmegaConf.to_container(cfg, resolve=True, structured_config_mode=SCMode.DICT_CONFIG)
     
-    num_model_classes = pred_scores_softmax.shape[-1] - 1 
-    
-    max_scores_no_bg, pred_class_indices_no_bg = torch.max(pred_scores_softmax[:, :num_model_classes], dim=1)
+    dataset_cfg = cfg_dict.get("dataset", {})
+    model_cfg = cfg_dict.get("model", {})
+    eval_cfg_params = cfg_dict.get("evaluation", {}).get("eval_detection_cfg", {})
+    vis_cfg = cfg_dict.get("visualization", {})
+    render_cfg = cfg_dict.get("render", {})
+    training_cfg = cfg_dict.get("training", {})
 
-    devkit_boxes: List[DevkitBox] = []
-    for i in range(max_scores_no_bg.shape[0]): 
-        score = max_scores_no_bg[i].item()
-        
-        if score < score_threshold:
-            continue
-            
-        class_idx = pred_class_indices_no_bg[i].item()
-        if class_idx >= len(class_names): 
-            print(f"Warnung: Vorhergesagter Klassenindex {class_idx} außerhalb des Bereichs von class_names (Länge {len(class_names)}).")
-            continue
-        detection_name = class_names[class_idx]
-        
-        box_params = pred_boxes_7d[i].cpu().numpy() 
-        
-        center = box_params[0:3]
-        size = box_params[3:6] # w,l,h
-        yaw = box_params[6]
-        orientation = PyQuaternion(axis=[0, 0, 1], angle=yaw)
-        
-        db = DevkitBox(
-            center=center.tolist(), size=size.tolist(), orientation=orientation,
-            name=detection_name, score=score, token=f"pred_{sample_token}_{i}"
-        )
-        devkit_boxes.append(db)
-        
-    return devkit_boxes
+    device = torch.device(training_cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    logger.info(f"Verwende Gerät: {device}")
 
-def main(args):
-    print(f"Lade Konfiguration von: {args.config_path}")
-    cfg = load_config(args.config_path)
-
-    dataset_cfg = cfg.get("dataset", {})
-    model_cfg = cfg.get("model", {})
-    eval_cfg_params = cfg.get("evaluation", {}).get("eval_detection_cfg", {})
-    vis_cfg = cfg.get("visualization", {})
-    render_cfg = cfg.get("render", {})
-
-    device = torch.device(args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu"))
-    print(f"Verwende Gerät: {device}")
-
-    print("Initialisiere TruckScenes und Dataset für Sample-Auswahl...")
+    logger.info("Initialisiere TruckScenes und Dataset für Sample-Auswahl...")
     ts = TruckScenes(version=dataset_cfg["version"], dataroot=dataset_cfg["dataroot"], verbose=False)
     
-    # Nutze einen Split aus der Trainingskonfiguration, um auf Samples zugreifen zu können
-    # (z.B. den Validierungssplit)
-    default_split_for_sample_access = cfg.get("training", {}).get("val_split_name", "mini_val")
-    split_for_sample_access = args.split if args.split else default_split_for_sample_access
-
+    split_for_sample_access = training_cfg.get("val_split_name", "mini_val")
+    logger.info(f"Lade Samples aus dem Split: '{split_for_sample_access}'")
     vis_dataset = ObjectFusionGTDataset(
         dataroot=dataset_cfg["dataroot"], version=dataset_cfg["version"],
         split_name=split_for_sample_access, 
-        pipeline_config=cfg, 
-        verbose=False # Weniger Output für reine Visualisierung
+        pipeline_config=cfg_dict, 
+        verbose=False
     )
 
     if not vis_dataset.sample_tokens:
-        print(f"Fehler: Keine Samples im Dataset für Split '{split_for_sample_access}' gefunden.")
+        logger.error(f"Fehler: Keine Samples im Dataset für Split '{split_for_sample_access}' gefunden.")
         return
 
+    # Wähle ein Sample zur Visualisierung aus
     sample_to_visualize_token: Optional[str] = None
-    if args.sample_token:
-        # Überprüfe, ob der Token im gesamten Datensatz (via ts) existiert, nicht nur im Split
-        try:
-            ts.get('sample', args.sample_token) # Löst Fehler aus, wenn Token nicht existiert
-            sample_to_visualize_token = args.sample_token
-        except KeyError:
-            print(f"Fehler: Sample-Token '{args.sample_token}' nicht im Datensatz gefunden.")
-            return
-    elif args.sample_idx is not None:
-        if 0 <= args.sample_idx < len(vis_dataset.sample_tokens): # Index bezogen auf den geladenen Split
-            sample_to_visualize_token = vis_dataset.sample_tokens[args.sample_idx]
+    if training_cfg.get('sample_token_for_vis'):
+        sample_to_visualize_token = training_cfg.get('sample_token_for_vis')
+    else:
+        sample_idx = training_cfg.get('sample_idx_for_vis', 0)
+        if 0 <= sample_idx < len(vis_dataset):
+            sample_to_visualize_token = vis_dataset.sample_tokens[sample_idx]
         else:
-            print(f"Fehler: Sample-Index {args.sample_idx} ist außerhalb des Bereichs (0-{len(vis_dataset.sample_tokens)-1}) für Split '{split_for_sample_access}'.")
+            logger.error(f"Fehler: sample_idx_for_vis {sample_idx} ist außerhalb des gültigen Bereichs für Split '{split_for_sample_access}'.")
             return
-    else: 
-        sample_to_visualize_token = vis_dataset.sample_tokens[0] # Nimm das erste Sample des Splits
-    
-    print(f"Visualisiere Sample-Token: {sample_to_visualize_token}")
-    
-    # Finde den Index des Tokens im Dataset (für __getitem__)
+
+    logger.info(f"Visualisiere Sample-Token: {sample_to_visualize_token}")
+
+    # Finde den Index des Tokens im Dataset für __getitem__
     try:
         sample_idx_in_dataset = vis_dataset.sample_tokens.index(sample_to_visualize_token)
     except ValueError:
-        # Fallback: Wenn Token nicht im Split ist, versuche ihn direkt aus dem Dataset zu laden
-        # (Dies erfordert, dass das Dataset so angepasst wird, dass es auch direkte Token-Anfragen unterstützt,
-        # oder wir holen die Daten für das Modell-Input anders)
-        # Für jetzt: Breche ab, wenn Token nicht im geladenen Split ist, um es einfach zu halten.
-        print(f"Fehler: Sample-Token {sample_to_visualize_token} nicht im geladenen Split '{split_for_sample_access}' des Datasets gefunden.")
-        print("Tipp: Verwende einen Sample-Token, der im Split enthalten ist, oder gib einen Split an, der ihn enthält.")
+        logger.error(f"Fehler: Sample-Token {sample_to_visualize_token} nicht im geladenen Split '{split_for_sample_access}' gefunden.")
         return
 
-
-    print(f"Lade Modell von Checkpoint: {args.checkpoint_path}")
-    encoder = ObjectEncoder(
-        num_input_features=model_cfg.get("num_input_features", 10),
-        d_model=model_cfg.get("d_model", 256), nhead=model_cfg.get("nhead", 8),
-        num_encoder_layers=model_cfg.get("num_encoder_layers", 3),
-        dim_feedforward=model_cfg.get("dim_feedforward_encoder", model_cfg.get("d_model", 256) * 4),
-        dropout=model_cfg.get("dropout", 0.1),
-        pe_max_coord_val=model_cfg.get("pe_max_coord_val", 150.0),
-        pe_num_freq_bands=model_cfg.get("pe_num_freq_bands"))
-    decoder = ObjectFusionTransformerDecoder(
-        d_model=model_cfg.get("d_model", 256), nhead=model_cfg.get("nhead", 8),
-        num_decoder_layers=model_cfg.get("num_decoder_layers", 3),
-        dim_feedforward=model_cfg.get("dim_feedforward_decoder", model_cfg.get("d_model", 256) * 4),
-        dropout=model_cfg.get("dropout", 0.1), num_queries=model_cfg.get("num_queries", 100),
-        num_classes=model_cfg.get("num_classes", 28), box_dim=model_cfg.get("box_dim", 7))
+    # Lade das Modell
+    checkpoint_path = training_cfg.get('resume_checkpoint')
+    if not checkpoint_path or not os.path.exists(checkpoint_path):
+        hydra_run_dir = hydra.core.hydra_config.HydraConfig.get().run.dir
+        checkpoint_path = Path(hydra_run_dir) / training_cfg.get('checkpoint_dir') / "oft_c_best.pth.tar"
+        logger.info(f"Kein expliziter Checkpoint angegeben, versuche besten Checkpoint aus dem Run-Verzeichnis: {checkpoint_path}")
+        if not checkpoint_path.exists():
+            logger.error(f"Fehler: Checkpoint-Datei nicht gefunden unter {checkpoint_path}")
+            return
+    
+    logger.info(f"Lade Modell von Checkpoint: {checkpoint_path}")
+    encoder = ObjectEncoder(**model_cfg) # Nutze **kwargs für einfache Initialisierung
+    decoder = ObjectFusionTransformerDecoder(**model_cfg)
     model = ObjectFusionTransformerModel(encoder, decoder)
     
-    if not os.path.isfile(args.checkpoint_path):
-        print(f"Fehler: Checkpoint-Datei nicht gefunden: {args.checkpoint_path}")
-        return
-    _, _, _ = load_checkpoint(args.checkpoint_path, model, optimizer=None, device=device)
+    load_checkpoint(str(checkpoint_path), model, None, None, None, device, logger)
     model.to(device)
     model.eval()
 
-    # Hole das einzelne Sample aus dem Dataset und erstelle einen Batch der Größe 1
+    # Bereite Model-Input vor
     single_sample_data_dict = vis_dataset[sample_idx_in_dataset]
-    # WICHTIG für Eval: `gt_detections_list_raw` muss in Collate-Fn hinzugefügt werden
-    # Für Visualisierung hier fügen wir es manuell hinzu, falls nicht von Collate-Fn schon gemacht
-    if 'gt_detections_list_raw' not in single_sample_data_dict: # sollte nicht passieren, wenn collate angepasst ist
-        single_sample_data_dict_for_collate = {k:v for k,v in single_sample_data_dict.items()}
-        single_sample_data_dict_for_collate['gt_detections_list_raw'] = [single_sample_data_dict['gt_detections']]
-    else:
-        single_sample_data_dict_for_collate = single_sample_data_dict
-
-    batch_for_model = object_fusion_gt_collate_fn([single_sample_data_dict_for_collate])
-
-
+    batch_for_model = object_fusion_gt_collate_fn([single_sample_data_dict])
+    
+    # Extrahiere Daten aus dem Batch und sende sie auf das Gerät
     encoder_input_features = batch_for_model["encoder_input_features"].to(device)
     encoder_input_mask = batch_for_model["encoder_input_mask"].to(device)
-    src_xyz_centers = encoder_input_features[:, :, :3].clone()
-
-    print("Mache Vorhersagen mit dem geladenen Modell...")
-    with torch.no_grad():
-        outputs_dict = model(
-            src_features=encoder_input_features,
-            src_padding_mask=encoder_input_mask,
-            src_xyz_centers=src_xyz_centers
-        )
+    encoder_input_xyz_centers = batch_for_model["encoder_input_xyz_centers"].to(device)
     
-    pred_logits_sample = outputs_dict['pred_logits'][0].cpu() 
-    pred_boxes_sample = outputs_dict['pred_boxes'][0].cpu()   
+    gt_target_labels = batch_for_model['gt_target_labels'].to(device)
+    gt_target_boxes_log_dims = batch_for_model['gt_target_boxes_log_dims'].to(device)
+    gt_target_boxes_actual_dims = batch_for_model['gt_target_boxes_actual_dims'].to(device)
 
-    class_names = dataset_cfg.get("class_names")
-    if not class_names:
-        print("Fehler: 'dataset.class_names' nicht in Config gefunden.")
-        return
-    
-    score_thresh_for_vis = args.score_threshold if args.score_threshold is not None \
-                           else eval_cfg_params.get("conf_th_eval", 0.3)
-    predicted_devkit_boxes = convert_predictions_to_devkit_boxes(
-        pred_logits_sample, pred_boxes_sample, class_names, score_thresh_for_vis, sample_to_visualize_token
+    # Erstelle Matcher, um Zuordnungen zu finden
+    matcher_cfg = cfg_dict.get('loss', {})
+    matcher = HungarianMatcher(
+        cost_class=float(matcher_cfg.get('cost_class_weight', 2.0)),
+        cost_bbox_l1_offset=float(matcher_cfg.get('cost_bbox_l1_offset_weight', 5.0)),
+        cost_giou_bev=float(matcher_cfg.get('cost_giou_bev_weight', 2.0)),
+        center_offset_scale_for_matcher_cost=float(model_cfg.get('center_offset_scale', 5.0))
     )
-    print(f"{len(predicted_devkit_boxes)} vorhergesagte Boxen nach Score-Filterung (>{score_thresh_for_vis:.2f}).")
 
+    logger.info("Mache Vorhersagen mit dem geladenen Modell...")
+    with torch.no_grad():
+        predictions = model(encoder_input_features, encoder_input_xyz_centers, encoder_input_mask)
+        
+        # Rekonstruiere Boxen mit der gleichen Logik wie in der Evaluation
+        pred_logits_batch = predictions['pred_logits']
+        pred_box_offsets_batch = predictions['pred_box_offsets']
+        
+        indices = matcher(
+            pred_logits_batch, pred_box_offsets_batch, gt_target_labels, 
+            gt_target_boxes_actual_dims, gt_target_boxes_log_dims
+        )
+        
+        # Wir visualisieren nur für das erste (und einzige) Sample im Batch
+        pred_indices, gt_indices = indices[0]
+        
+        matched_pred_logits = pred_logits_batch[0, pred_indices]
+        matched_pred_offsets = pred_box_offsets_batch[0, pred_indices]
+        
+        valid_gt_mask_i = batch_for_model['gt_target_valid_mask'][0]
+        matched_gt_boxes_actual = gt_target_boxes_actual_dims[0, valid_gt_mask_i][gt_indices]
+        matched_gt_boxes_log = gt_target_boxes_log_dims[0, valid_gt_mask_i][gt_indices]
+
+        # Rekonstruktion
+        recon_centers = matched_gt_boxes_actual[:, :3] + matched_pred_offsets[:, :3]
+        recon_log_dims = matched_gt_boxes_log[:, 3:6] + matched_pred_offsets[:, 3:6]
+        recon_actual_dims = torch.exp(recon_log_dims)
+        recon_yaws = matched_gt_boxes_actual[:, 6:7] + matched_pred_offsets[:, 6:7]
+        recon_yaws = (recon_yaws + math.pi) % (2 * math.pi) - math.pi
+
+        pred_boxes_reconstructed_vehicle = torch.cat(
+            (recon_centers, recon_actual_dims, recon_yaws), dim=-1
+        ).cpu().numpy()
+
+    # Konvertiere GT und Vorhersagen in DevkitBox-Objekte
+    class_names = dataset_cfg.get("class_names")
+    score_thresh_for_vis = training_cfg.get("score_threshold_for_vis", 0.3)
+
+    predicted_devkit_boxes: List[DevkitBox] = []
+    softmax_scores = F.softmax(matched_pred_logits, dim=-1)
+    scores, labels = torch.max(softmax_scores[:, :len(class_names)], dim=-1)
+
+    for i in range(pred_boxes_reconstructed_vehicle.shape[0]):
+        if scores[i] < score_thresh_for_vis:
+            continue
+        
+        box_params = pred_boxes_reconstructed_vehicle[i]
+        label_idx = labels[i].item()
+        detection_name = class_names[label_idx]
+
+        db = DevkitBox(
+            center=box_params[:3], size=box_params[3:6],
+            orientation=PyQuaternion(axis=[0, 0, 1], angle=box_params[6]),
+            name=detection_name, score=scores[i].item(),
+            token=f"pred_{sample_to_visualize_token}_{i}"
+        )
+        predicted_devkit_boxes.append(db)
+    
     gt_devkit_boxes: List[DevkitBox] = []
-    for gt_det in single_sample_data_dict['gt_detections']:
-        box_params_gt = gt_det['box_world']
+    for gt_det in single_sample_data_dict['gt_detections_raw_world_current_frame']:
+        box_world = gt_det['box_7d_world']
         db_gt = DevkitBox(
-            center=box_params_gt[0:3].tolist(), size=box_params_gt[3:6].tolist(),
-            orientation=PyQuaternion(axis=[0,0,1], angle=box_params_gt[6]),
-            name=class_names[gt_det['class_label']], token=gt_det['annotation_token']
+            center=box_world[:3], size=box_world[3:6],
+            orientation=PyQuaternion(axis=[0, 0, 1], angle=box_world[6]),
+            name=gt_det['detection_name'], token=gt_det['annotation_token']
         )
         gt_devkit_boxes.append(db_gt)
-    print(f"{len(gt_devkit_boxes)} Ground-Truth Boxen geladen.")
 
-    camera_channel_to_render = args.camera_channel if args.camera_channel else vis_cfg.get("camera_channel", "CAMERA_LEFT_FRONT")
-    sample_record_ts = ts.get('sample', sample_to_visualize_token)
-    
-    if camera_channel_to_render not in sample_record_ts['data']:
-        print(f"Fehler: Kamera-Kanal '{camera_channel_to_render}' nicht in Sample {sample_to_visualize_token}. Verfügbar: {list(sample_record_ts['data'].keys())}")
+    logger.info(f"{len(predicted_devkit_boxes)} vorhergesagte Boxen und {len(gt_devkit_boxes)} GT-Boxen gefunden.")
+
+    # Lade Kamerabild und Kalibrierungsdaten
+    camera_channel = vis_cfg.get("camera_channel", "CAMERA_FRONT")
+    sample_rec = ts.get('sample', sample_to_visualize_token)
+    cam_token = sample_rec['data'].get(camera_channel)
+    if not cam_token:
+        logger.error(f"Kamerakanal '{camera_channel}' nicht in Sample {sample_to_visualize_token} gefunden.")
         return
+        
+    cam_path, _, cam_intrinsics, ego_pose, cs_rec = ts.get_sample_data(cam_token, get_sensor_extrinsics=True, get_color=True)
+    image = cv2.imread(cam_path)
+    world_to_sensor_transform = get_sensor_extrinsic(ego_pose, cs_rec)
 
-    sd_token = sample_record_ts['data'][camera_channel_to_render]
-    sd_record = ts.get('sample_data', sd_token)
-    image_path = os.path.join(ts.dataroot, sd_record['filename'])
-    image = cv2.imread(image_path)
-    if image is None: print(f"Fehler: Bild konnte nicht geladen werden: {image_path}"); return
+    # Transformiere rekonstruierte Fahrzeug-Boxen in Welt-Koordinaten für die Visualisierung
+    ego_translation_world = batch_for_model['ego_translations_world'][0].numpy()
+    ego_rotation_world = PyQuaternion(batch_for_model['ego_rotations_world_quat'][0].numpy())
+    for box in predicted_devkit_boxes:
+        box.rotate(ego_rotation_world)
+        box.translate(ego_translation_world)
 
-    cs_record = ts.get('calibrated_sensor', sd_record['calibrated_sensor_token'])
-    ego_pose_rec = ts.get('ego_pose', sd_record['ego_pose_token'])
-    K_matrix = get_camera_intrinsic(cs_record)
-    H_world_to_sensor = get_sensor_extrinsic(ego_pose_rec, cs_record)
-    
-    # Temporäre Kopie der CLASS_COLORS für diese Visualisierung, um globale Änderungen zu vermeiden
-    current_class_colors = CLASS_COLORS.copy()
-    # GT-Boxen in Grün
-    for gt_box in gt_devkit_boxes: gt_box.name = "gt_viz_c6" 
-    current_class_colors["gt_viz_c6"] = (0, 255, 0) # Grün für GT
-    
-    # Vorhergesagte Boxen: Farben basierend auf ihrer echten Klasse (aus class_names)
-    # Die 'draw_boxes_on_image' Funktion verwendet box.name, um die Farbe aus CLASS_COLORS zu holen.
-    # Die Namen in predicted_devkit_boxes sind bereits die Klassennamen.
-
-    image_to_draw_on = image.copy()
-    # Zeichne zuerst GT
-    image_to_draw_on = draw_boxes_on_image(
-        image=image_to_draw_on, boxes=gt_devkit_boxes, camera_k_matrix=K_matrix,
-        world_to_sensor_transform=H_world_to_sensor,
-        line_thickness=render_cfg.get("line_thickness", 2),
-        z_threshold=render_cfg.get("z_threshold", 0.1),
-        box_type_for_debug="gt_c6_viz"
+    # Zeichne Boxen
+    image_with_gt = draw_boxes_on_image(
+        image.copy(), gt_devkit_boxes, K=cam_intrinsics,
+        world_to_sensor_transform=world_to_sensor_transform,
+        line_thickness=2, colors={b.name: get_color(b.name, 'gt') for b in gt_devkit_boxes}
     )
-    # Dann zeichne Vorhersagen
-    image_to_draw_on = draw_boxes_on_image(
-        image=image_to_draw_on, boxes=predicted_devkit_boxes, camera_k_matrix=K_matrix,
-        world_to_sensor_transform=H_world_to_sensor,
-        line_thickness=render_cfg.get("line_thickness", 2),
-        z_threshold=render_cfg.get("z_threshold", 0.1),
-        box_type_for_debug="pred_c6_viz"
+    image_with_all = draw_boxes_on_image(
+        image_with_gt, predicted_devkit_boxes, K=cam_intrinsics,
+        world_to_sensor_transform=world_to_sensor_transform,
+        line_thickness=2, colors={b.name: get_color(b.name, 'pred') for b in predicted_devkit_boxes}
     )
-    
-    output_dir = args.output_dir if args.output_dir else os.path.join(cfg.get("training", {}).get("checkpoint_dir", "./checkpoints_temp"), "c6_visualizations")
-    os.makedirs(output_dir, exist_ok=True)
-    
-    confidence_str = str(score_thresh_for_vis).replace('.', '_')
-    checkpoint_name = os.path.splitext(os.path.basename(args.checkpoint_path))[0]
-    output_filename = f"transformer_fusion_{sample_to_visualize_token}_{camera_channel_to_render}_{checkpoint_name}_conf{confidence_str}.jpg"
-    output_path = os.path.join(output_dir, output_filename)
-    
-    cv2.imwrite(output_path, image_to_draw_on)
-    print(f"Visualisierung gespeichert unter: {output_path}")
 
-    if args.show:
-        cv2.imshow(f"Transformer Fusion: {sample_to_visualize_token} | Checkpoint: {checkpoint_name}", image_to_draw_on)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+    # Speichere das Ergebnis
+    output_dir = Path(hydra.core.hydra_config.HydraConfig.get().run.dir) / "visualizations"
+    output_dir.mkdir(exist_ok=True)
+    checkpoint_name = Path(str(checkpoint_path)).stem
+    output_filename = f"vis_{sample_to_visualize_token}_{checkpoint_name}.jpg"
+    output_path = output_dir / output_filename
+    cv2.imwrite(str(output_path), image_with_all)
+    logger.info(f"Visualisierung gespeichert unter: {output_path}")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Visualisiere Transformer Fusionsergebnisse (C6).")
-    parser.add_argument('--config_path', type=str, required=True, help='Pfad zur YAML-Konfigurationsdatei (pipeline_c_modules.yaml).')
-    parser.add_argument('--checkpoint_path', type=str, required=True, help='Pfad zum trainierten Modell-Checkpoint (.pth.tar).')
-    parser.add_argument('--sample_token', type=str, default=None, help='Spezieller Sample-Token zur Visualisierung.')
-    parser.add_argument('--sample_idx', type=int, default=None, help='Index des Samples im gewählten Split (wenn kein Token gegeben). Default: 0. Split wird aus Config genommen.')
-    parser.add_argument('--split', type=str, default=None, help="Name des Splits, aus dem das Sample (--sample_idx) genommen wird (z.B. 'mini_val'). Überschreibt Config für Sample-Auswahl.")
-    parser.add_argument('--camera_channel', type=str, default=None, help='Kamerakanal für die Visualisierung (überschreibt Config).')
-    parser.add_argument('--device', type=str, default=None, help='Gerät für Inferenz (z.B. "cuda", "cpu"; überschreibt Config).')
-    parser.add_argument('--output_dir', type=str, default=None, help='Optionales Verzeichnis zum Speichern der Bilder.')
-    parser.add_argument('--score_threshold', type=float, default=None, help="Konfidenz-Schwellenwert für anzuzeigende Vorhersagen (überschreibt Eval-Config).")
-    parser.add_argument('--show', action='store_true', help="Zeige das Bild interaktiv an (benötigt Desktop-Umgebung).")
+    # Dieses Skript wird am besten über Hydra aufgerufen, damit die Konfiguration korrekt geladen wird.
+    # Beispielhafter Hydra-Aufruf:
+    # python src/oft/transformer/visualize_transformer_fusion.py \
+    #   training.resume_checkpoint="/path/to/your/oft_c_best.pth.tar" \
+    #   training.sample_idx_for_vis=10 
     
-    cli_args = parser.parse_args()
-    
-    if cli_args.sample_idx is None and cli_args.sample_token is None:
-        cli_args.sample_idx = 0 # Default auf erstes Sample im Split, wenn nichts angegeben
-        print(f"Weder --sample_token noch --sample_idx angegeben. Verwende Index 0 aus dem Split '{cli_args.split if cli_args.split else 'aus Config'}'.")
+    # Temporäre Fallback-Logik, um das Skript ohne Hydra lauffähig zu machen (eingeschränkt)
+    if not hydra.core.hydra_config.HydraConfig.initialized():
+        print("WARNUNG: Hydra nicht initialisiert. Versuche, die Konfiguration manuell zu laden. "
+              "Dies ist nur für einfaches Debugging gedacht.")
+        
+        # Manuelle Konfiguration für den Notfall
+        default_config_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'pipeline_c_modules.yaml')
+        if not os.path.exists(default_config_path):
+             raise FileNotFoundError(f"Manuelle Konfiguration konnte nicht geladen werden: {default_config_path}")
 
-    main(cli_args)
+        # Erstelle ein minimales OmegaConf-Objekt für den Test
+        cfg_obj = OmegaConf.load(default_config_path)
+
+        # Überschreibe manuell Parameter, die normalerweise per Kommandozeile kommen würden
+        # HINWEIS: Passe diese Pfade für deinen lokalen Test an!
+        OmegaConf.update(cfg_obj, "training.resume_checkpoint", "/app/output/hydra_runs/oft_c_offset_norm_v1/2025-06-06/10-20-03/checkpoints_oft_c_offset_norm_v1/oft_c_best.pth.tar")
+        OmegaConf.update(cfg_obj, "training.sample_idx_for_vis", 5) # Wähle ein interessantes Sample
+
+        # Führe die main-Funktion mit der manuell erstellten Konfiguration aus
+        # Erstelle eine Dummy-Hydra-Umgebung für den Pfad
+        from hydra.core.hydra_config import HydraConfig
+        from hydra.core.utils import setup_globals
+        setup_globals()
+        HydraConfig.instance().set_config(cfg_obj)
+
+        main(cfg_obj)
+    else:
+        # Normaler Hydra-Start
+        @hydra.main(config_path="../../../config", config_name="pipeline_c_modules.yaml", version_base=None)
+        def hydra_entry_point(cfg: DictConfig):
+            main(cfg)
+        
+        hydra_entry_point()

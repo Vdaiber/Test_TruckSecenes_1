@@ -6,7 +6,7 @@ from typing import Optional
 
 # NEU: Importe für das Laden der Konfiguration im Test-Block
 import os
-from oft.utils.config import load_config
+# from oft.utils.config import load_config # Wird nur im if __name__ Block benötigt
 
 
 class PositionalEncoding3D(nn.Module):
@@ -136,9 +136,10 @@ class ObjectEncoder(nn.Module):
 
 if __name__ == '__main__':
     print("Running ObjectEncoder example with config-loaded parameters...")
+    from oft.utils.config import load_config # Import hier für den Testblock
 
     # --- ANPASSUNG START: Lade Konfiguration ---
-    config_file_path = "config/pipeline_c_modules.yaml"
+    config_file_path = os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'pipeline_c_modules.yaml')
     try:
         full_pipeline_config = load_config(config_file_path)
         print(f"Konfiguration für Encoder-Test geladen von: {os.path.abspath(config_file_path)}")
